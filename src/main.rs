@@ -90,16 +90,8 @@ pub mod common {
     }
 
     pub fn one_request(stream: &mut TcpStream) -> usize {
-        //byte header + MAX_MSG_SIZE
         let mut buffer: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
         let read_size = read_full(stream, &mut buffer[0..MSG_HEADER_SIZE], MSG_HEADER_SIZE);
-
-        // assert!(read_size != 0, "Readed header size is zero");
-        // assert!(
-        //     read_size == MSG_HEADER_SIZE,
-        //     "Readed size != MSG_HEADER_SIZE"
-        // );
-
         let message_size = get_header(&buffer);
 
         println!("One req Header: {:?} {}", read_size, message_size);
@@ -109,13 +101,6 @@ pub mod common {
             &mut buffer[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + message_size)],
             message_size,
         );
-
-        // assert!(read_size > 0, "Readed message size is zero");
-        // assert!(
-        //     read_size == message_size,
-        //     "Readed message size is not that expected"
-        // );
-
         let message = match str::from_utf8(&buffer[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + read_size)])
         {
             Ok(msg) => msg,
@@ -126,79 +111,15 @@ pub mod common {
         };
 
         println!("Server says: {}", message);
-
-        // let reply = String::from("Server got the message, ok");
-        // let mut reply_buffer = generate_message_buffer(reply.as_bytes());
-        // let len = reply_buffer.len();
-
-        // write_full(stream, &mut reply_buffer, len)
         message_size
     }
 
     pub fn query(stream: &mut TcpStream, message: &[u8]) -> usize {
-        // assert!(
-        //     message.len() <= MAX_MSG_SIZE,
-        //     "Message size is too big {}",
-        //     message.len()
-        // );
-
         let message_copy = generate_message_buffer(message);
-        let message_copy_len = message_copy.len();
+        let len = MSG_HEADER_SIZE + message.len();
 
-        let wsize = write_full(stream, &message_copy[0..message_copy_len], message_copy_len);
+        let wsize = write_full(stream, &message_copy[0..(len)], len);
         println!("Client says: {:?}", message);
-
-        // assert!(wsize != 0, "Wrote size is ZERO {}", wsize);
-        // assert!(
-        //     wsize < message_copy.len(),
-        //     "Wrote size is less then message size"
-        // );
-
-        //read respnse
-        // let mut response_buffer: [u8; MSG_HEADER_SIZE + MAX_MSG_SIZE] =
-        //     [0; MSG_HEADER_SIZE + MAX_MSG_SIZE];
-        // let rsize = read_full(
-        //     stream,
-        //     &mut response_buffer[0..MSG_HEADER_SIZE],
-        //     MSG_HEADER_SIZE,
-        // );
-
-        // assert!(rsize != 0, "Read size is ZERO {}", rsize);
-        // assert!(
-        //     rsize == MSG_HEADER_SIZE,
-        //     "Header size is lower than expected"
-        // );
-
-        // let message_size = get_header(&response_buffer);
-
-        // println!(
-        //     "Query Header: {:?} {} {}",
-        //     &response_buffer[0..MSG_HEADER_SIZE],
-        //     rsize,
-        //     message_size,
-        // );
-
-        // let read_size = read_full(
-        //     stream,
-        //     &mut response_buffer[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + message_size)],
-        //     message_size,
-        // );
-
-        // assert!(read_size > 0, "Readed message size is zero");
-        // assert!(
-        //     read_size < message_size,
-        //     "Readed message is lower than expected"
-        // );
-
-        // let message = match str::from_utf8(
-        //     &response_buffer[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + message_size)],
-        // ) {
-        //     Ok(msg) => msg,
-        //     Err(e) => {
-        //         println!("Failed to parse message buffer {:?}", e);
-        //         ""
-        //     }
-        // };
 
         wsize
     }
