@@ -1,0 +1,54 @@
+{
+ 
+    "version": "0.2.0",
+    "configurations": [
+
+        {
+            "name": "Debug executable 'simple_db'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=simple_db"
+                ]
+            },
+            "args": []
+        },
+        {
+            "name": "Server",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=simple_db"
+                ]
+            },
+            "args": ["--features", "server"]
+        },
+        {
+            "name": "Client",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=simple_db"
+                ]
+            },
+            "args": ["--features", "client"]
+        },
+        {
+            "name": "Debug unit tests in executable 'simple_db'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=simple_db"
+                ]
+            }
+        }
+    ]
+}
