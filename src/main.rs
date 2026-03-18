@@ -2,7 +2,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 
 use socket2::*;
 
-use crate::common::{one_request, query};
+use crate::common::{process_message_read, process_message_write};
 
 const MAX_MSG_SIZE: usize = 4096;
 const MSG_HEADER_SIZE: usize = 8;
@@ -89,18 +89,19 @@ pub mod common {
         buffer
     }
 
-    pub fn one_request(stream: &mut TcpStream) -> usize {
+    pub fn process_message_read(stream: &mut TcpStream) -> String {
         let mut buffer: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
         let read_size = read_full(stream, &mut buffer[0..MSG_HEADER_SIZE], MSG_HEADER_SIZE);
         let message_size = get_header(&buffer);
-
-        println!("One req Header: {:?} {}", read_size, message_size);
 
         let read_size = read_full(
             stream,
             &mut buffer[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + message_size)],
             message_size,
         );
+
+        println!("READ: {:?} {}", read_size, message_size);
+
         let message = match str::from_utf8(&buffer[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + read_size)])
         {
             Ok(msg) => msg,
@@ -110,18 +111,39 @@ pub mod common {
             }
         };
 
-        println!("Server says: {}", message);
-        message_size
+        message.to_string()
     }
 
-    pub fn query(stream: &mut TcpStream, message: &[u8]) -> usize {
+    pub fn process_message_write(stream: &mut TcpStream, message: &[u8]) -> usize {
         let message_copy = generate_message_buffer(message);
         let len = MSG_HEADER_SIZE + message.len();
 
         let wsize = write_full(stream, &message_copy[0..(len)], len);
-        println!("Client says: {:?}", message);
+
+        println!("WRITE: {} {}", wsize, len);
 
         wsize
+    }
+
+    pub fn client_process(stream: &mut TcpStream, message: &[u8]) -> usize {
+        process_message_write(stream, message);
+
+        println!("Client sent: {:?} {}", message, message.len());
+
+        let message = process_message_read(stream);
+
+        println!("Client recv: {}", message);
+
+        0
+    }
+
+    pub fn server_process(stream: &mut TcpStream) -> usize {
+        let message = process_message_read(stream);
+
+        println!("Server recv: {}", message);
+
+        let message = format!("Server resend: {message}");
+        process_message_write(stream, message.as_bytes())
     }
 }
 
@@ -147,8 +169,10 @@ fn main() -> Result<(), std::io::Error> {
             let mut conn = listener.accept()?;
 
             loop {
+                use crate::common::server_process;
+
                 let stream = &mut conn.0;
-                let query_res = one_request(stream);
+                let query_res = server_process(stream);
                 if query_res == 0 {
                     break;
                 }
@@ -163,6 +187,8 @@ fn main() -> Result<(), std::io::Error> {
 
     #[cfg(feature = "client")]
     {
+        use crate::common::client_process;
+
         let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
             .expect("Failed to create a socket");
 
@@ -176,17 +202,17 @@ fn main() -> Result<(), std::io::Error> {
 
         let mut stream: TcpStream = socket.into();
 
-        let mut query_res = query(&mut stream, "Hello from client!".as_bytes());
+        let mut query_res = client_process(&mut stream, "Hello from client!".as_bytes());
         // if query_res == 0 {
         //     return Ok(());
         // }
 
-        query_res = query(&mut stream, "Again... Hello from client".as_bytes());
+        query_res = client_process(&mut stream, "Again... Hello from client".as_bytes());
         // if query_res == 0 {
         //     return Ok(());
         // }
 
-        query_res = query(&mut stream, "Last time... Hello from client".as_bytes());
+        query_res = client_process(&mut stream, "Last time... Hello from client".as_bytes());
         // if query_res == 0 {
         //     return Ok(());
         //
