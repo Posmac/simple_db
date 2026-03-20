@@ -9,3 +9,5 @@ server = []
 
 [dependencies]
 socket2 = "0.6.3"
+nix = { version = "0.31.2", features = ["event", "poll"] }
+libc = "0.2.183"
