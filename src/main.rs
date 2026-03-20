@@ -442,19 +442,19 @@ fn main() -> Result<(), std::io::Error> {
         queries.push(msg2.as_bytes());
         queries.push(msg3.as_bytes());
 
-        for q in queries.iter() {
-            let wsize = process_message_write(&mut stream, q);
-            if wsize == 0 {
-                println!("Failed to query from client");
+        loop {
+            for q in queries.iter() {
+                let wsize = process_message_write(&mut stream, q);
+                if wsize == 0 {
+                    println!("Failed to query from client");
+                }
+            }
+
+            for i in 0..queries.len() {
+                let rsize = process_message_read(&mut stream);
+                println!("Read from server: {rsize}");
             }
         }
-
-        for i in 0..queries.len() {
-            let rsize = process_message_read(&mut stream);
-            println!("Read from server: {rsize}");
-        }
-
-        loop {}
     }
 
     Ok(())
