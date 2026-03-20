@@ -1,11 +1,10 @@
 use std::{
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     os::fd::{AsFd, AsRawFd, BorrowedFd},
-    str::ParseBoolError,
 };
 
-use libc::{pipe, pollfd};
-use nix::poll::{self, PollFd, PollFlags, PollTimeout};
+use libc::if_msghdr2;
+use nix::poll::{PollFd, PollFlags, PollTimeout};
 use socket2::*;
 
 use crate::{
@@ -19,13 +18,12 @@ const MSG_HEADER_SIZE: usize = 8;
 #[derive(Default)]
 pub struct Connection {
     stream: Option<TcpStream>,
-    addr: Option<SocketAddr>,
     want_read: bool,
     want_write: bool,
     want_close: bool,
 
-    incoming_data: Vec<u8>,
-    outgoing_data: Vec<u8>,
+    incoming_data: Vec<u8>, //INFO: Data from TCP to parse
+    outgoing_data: Vec<u8>, //INFO: Data for TCP to send
 }
 
 impl Connection {
@@ -177,9 +175,13 @@ pub mod common {
 
 pub mod concurrent {
 
-    use crate::{Connection, MAX_MSG_SIZE, MSG_HEADER_SIZE};
+    use crate::{
+        Connection, MAX_MSG_SIZE, MSG_HEADER_SIZE,
+        common::{get_header, process_message_write},
+    };
     use std::{
-        io::{BufRead, Read, Write},
+        io::{Read, Write},
+        mem::swap,
         net::TcpListener,
     };
 
@@ -194,6 +196,8 @@ pub mod concurrent {
 
         let _ = listener.set_nonblocking(true);
 
+        println!("Accepted new connection: {:#?}", con.1);
+
         Some(Connection {
             stream: Some(con.0),
             want_read: true,
@@ -201,34 +205,39 @@ pub mod concurrent {
             want_close: false,
             incoming_data: vec![],
             outgoing_data: vec![],
-            addr: Some(con.1),
         })
     }
 
-    pub fn handle_read(conn: &mut Connection) {
-        let mut buf: [u8; MAX_MSG_SIZE] = [0; MAX_MSG_SIZE];
+    pub fn handle_read(conn: &mut Connection) -> usize {
+        let mut buf: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
         let read_size = match conn.stream.as_ref().unwrap().read(&mut buf) {
             Ok(0) => {
                 conn.want_close = true;
-                return;
+                return 0;
             }
-            Ok(v) => v,
+            Ok(v) => {
+                buf_append(&mut conn.incoming_data, &buf, v);
+
+                while try_one_request(conn) {}
+
+                if conn.outgoing_data.len() > 0 {
+                    conn.want_read = false;
+                    conn.want_write = true;
+
+                    return handle_write(conn);
+                };
+                v
+            }
             Err(e) => {
                 println!("Failed to read {:?}", e);
-                return;
+                return 0;
             }
         };
 
-        if conn.outgoing_data.len() > 0 {
-            conn.want_read = false;
-            conn.want_write = true;
-        }
-
-        //     buf_append();
-        //     try_one_request();
+        read_size
     }
 
-    pub fn handle_write(conn: &mut Connection) {
+    pub fn handle_write(conn: &mut Connection) -> usize {
         let write_size = match conn
             .stream
             .as_ref()
@@ -237,48 +246,59 @@ pub mod concurrent {
         {
             Ok(0) => {
                 conn.want_close = true;
-                return;
+                return 0;
             }
             Ok(size) => {
                 buf_consume(&mut conn.outgoing_data, size);
+                if conn.outgoing_data.len() == 0 {
+                    conn.want_read = true;
+                    conn.want_write = false;
+                }
+                size
             }
             Err(e) => {
                 println!("Failed to read from stream {:?}", e);
-                return;
+                return 0;
             }
         };
 
-        if conn.outgoing_data.len() > 0 {
-            conn.want_read = true;
-            conn.want_write = false;
-        }
+        write_size
     }
 
-    // pub fn try_one_request(conn: &mut Connection) -> bool {
-    //     if conn.incoming_data.len() < MSG_HEADER_SIZE {
-    //         return false;
-    //     }
+    pub fn try_one_request(conn: &mut Connection) -> bool {
+        if conn.incoming_data.len() < MSG_HEADER_SIZE {
+            return false;
+        }
 
-    //     let mut len_buffer = [0u8; MSG_HEADER_SIZE];
-    //     len_buffer.copy_from_slice(conn.incoming_data.as_slice());
-    //     let len = usize::from_ne_bytes(len_buffer);
+        let len = get_header(&conn.incoming_data.as_slice()[0..MSG_HEADER_SIZE]);
 
-    //     if len > MAX_MSG_SIZE {
-    //         conn.want_close = true;
-    //         return false;
-    //     };
+        if len > MAX_MSG_SIZE {
+            conn.want_close = true;
+            return false;
+        };
 
-    //     if MSG_HEADER_SIZE + MAX_MSG_SIZE > conn.incoming_data.len() {
-    //         return false;
-    //     };
+        if MSG_HEADER_SIZE + MAX_MSG_SIZE < conn.incoming_data.len() {
+            return false;
+        };
+        println!("There: {}", len);
 
-    //     buf_consume(&mut conn.incoming_data, MSG_HEADER_SIZE + len);
+        let msg = str::from_utf8(
+            &conn.incoming_data.as_slice()[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + len)],
+        )
+        .unwrap_or_default();
 
-    //     return true;
-    // }
+        println!("Client says: {} {:?}", len, msg);
 
-    pub fn buf_append(buf: &mut Vec<u8>, data: &[u8]) {
-        buf.extend_from_slice(data);
+        buf_append(&mut conn.outgoing_data, &len.to_ne_bytes(), MSG_HEADER_SIZE);
+        buf_append(&mut conn.outgoing_data, &msg.as_bytes(), len);
+
+        buf_consume(&mut conn.incoming_data, MSG_HEADER_SIZE + len);
+
+        return true;
+    }
+
+    pub fn buf_append(buf: &mut Vec<u8>, data: &[u8], len: usize) {
+        buf.extend_from_slice(&data[0..len]);
     }
 
     pub fn buf_consume(buf: &mut Vec<u8>, len: usize) {
@@ -288,7 +308,7 @@ pub mod concurrent {
 
 #[allow(unreachable_code)]
 fn main() -> Result<(), std::io::Error> {
-    // #[cfg(feature = "server")]
+    #[cfg(feature = "server")]
     {
         let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
             .expect("Failed to create socket");
@@ -315,6 +335,10 @@ fn main() -> Result<(), std::io::Error> {
             poll_args.push(pfd);
 
             for connection in connections.iter() {
+                if connection.is_none() {
+                    continue;
+                }
+
                 let mut events = PollFlags::POLLERR;
                 let connection = connection.as_ref().unwrap();
 
@@ -355,7 +379,7 @@ fn main() -> Result<(), std::io::Error> {
 
                 let fd = handle.get_fd();
                 if connections.len() <= fd {
-                    connections.resize_with(handle.get_fd(), Default::default);
+                    connections.resize_with(fd + 1, Default::default);
                     connections[fd] = Some(handle);
                 }
             }
@@ -404,13 +428,19 @@ fn main() -> Result<(), std::io::Error> {
             .expect("failed to connect to the server");
 
         let mut stream: TcpStream = socket.into();
+        let local_addr = stream.peer_addr().unwrap().to_string();
+        let mut str: Vec<u8> = vec![65; MAX_MSG_SIZE - 200];
+        str.extend_from_slice(local_addr.as_bytes());
 
-        let str: Vec<u8> = vec![255; MAX_MSG_SIZE];
         let mut queries = vec![];
+        let msg1 = format!("Hello from client! {}", local_addr);
+        let msg2 = format!("AGAIN_Hello from client! {}", address);
+        let msg3 = format!("LAST_Hello from client! {}", address);
+
         queries.push(str.as_slice());
-        queries.push("Hello from client!".as_bytes());
-        queries.push("AGAIN...Hello from client!".as_bytes());
-        queries.push("LAST...Hello from client!".as_bytes());
+        queries.push(msg1.as_bytes());
+        queries.push(msg2.as_bytes());
+        queries.push(msg3.as_bytes());
 
         for q in queries.iter() {
             let wsize = process_message_write(&mut stream, q);
@@ -428,4 +458,10 @@ fn main() -> Result<(), std::io::Error> {
     }
 
     Ok(())
+}
+
+pub mod test {
+    #[test]
+    #[cfg(feature = "client")]
+    pub fn multiple_connections() {}
 }
