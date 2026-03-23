@@ -594,14 +594,12 @@ fn main() -> Result<(), std::io::Error> {
         let local_addr = stream.peer_addr().unwrap().to_string();
 
         let commands = vec![
-            //
             "get", "hello", ////
-            "set", "hello",
-            "nothing", ///
-            "get", "hello", ///
-             "get", "server", ///
-             "del", "hello",
-              "get", "hello",
+            "set", "hello", "nothing", ////
+            "get", "hello", ////
+            "get", "server", ////
+            "del", "hello", ////
+            "get", "hello", ////
         ];
 
         let wsize = send_request(&mut stream, &commands);
@@ -609,7 +607,7 @@ fn main() -> Result<(), std::io::Error> {
 
         loop {
             let rsize = read_response(&mut stream);
-            println!("Read size {}", rsize);
+            // println!("Read size {}", rsize);
             if rsize == 0 {
                 break;
             }
