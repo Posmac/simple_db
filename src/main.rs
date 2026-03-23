@@ -1,23 +1,25 @@
 use std::{
+    collections::HashMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
     os::fd::{AsFd, AsRawFd, BorrowedFd},
+    sync::{LazyLock, Mutex},
 };
 
-use libc::if_msghdr2;
 use nix::poll::{PollFd, PollFlags, PollTimeout};
 use socket2::*;
 
 use crate::{
-    common::{process_message_read, process_message_write},
-    concurrent::{handle_accept, handle_read, handle_write},
+    common::process_message_read,
+    concurrent::{handle_accept, handle_read, handle_write, read_response, send_request},
 };
 
-const MAX_MSG_SIZE: usize = 4096;
+const MAX_MSG_SIZE: usize = 65535;
 const MSG_HEADER_SIZE: usize = 8;
+const RESPONSE_STATUS_SIZE: usize = 4;
+const MAX_COMMANDS_SIZE: usize = 1024;
 
-#[derive(Default)]
 pub struct Connection {
-    stream: Option<TcpStream>,
+    stream: TcpStream,
     want_read: bool,
     want_write: bool,
     want_close: bool,
@@ -28,10 +30,20 @@ pub struct Connection {
 
 impl Connection {
     pub fn get_fd(&self) -> usize {
-        let fd = self.stream.as_ref().unwrap().as_raw_fd();
+        // let fd = self.stream.as_ref().unwrap().as_raw_fd();
+        let fd = self.stream.as_raw_fd();
         fd as usize
     }
 }
+
+#[derive(Default, Debug)]
+pub struct Response {
+    pub status: i32,
+    pub data: Option<Vec<u8>>,
+}
+
+static PLACE_HOLDER: LazyLock<Mutex<HashMap<String, String>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub mod common {
     use std::{
@@ -105,15 +117,27 @@ pub mod common {
         message_size
     }
 
-    pub fn generate_message_buffer(message: &[u8]) -> [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] {
-        let mut buffer: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
+    pub fn get_message(bytes: &[u8], offset: usize, size: usize) -> String {
+        let message = match str::from_utf8(&bytes[offset..(offset + size)]) {
+            Ok(msg) => msg,
+            Err(e) => {
+                println!("Failed to parse message buffer {:?}", e);
+                ""
+            }
+        };
 
-        let message_len_bytes = message.len().to_ne_bytes();
-        buffer[0..MSG_HEADER_SIZE].copy_from_slice(&message_len_bytes);
-        buffer[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + message.len())].copy_from_slice(message);
-
-        buffer
+        message.to_string()
     }
+
+    // pub fn generate_message_buffer(message: &[u8]) -> [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] {
+    //     let mut buffer: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
+
+    //     let message_len_bytes = message.len().to_ne_bytes();
+    //     buffer[0..MSG_HEADER_SIZE].copy_from_slice(&message_len_bytes);
+    //     buffer[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + message.len())].copy_from_slice(message);
+
+    //     buffer
+    // }
 
     pub fn process_message_read(stream: &mut TcpStream) -> String {
         let mut buffer: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
@@ -139,50 +163,18 @@ pub mod common {
 
         message.to_string()
     }
-
-    pub fn process_message_write(stream: &mut TcpStream, message: &[u8]) -> usize {
-        let message_copy = generate_message_buffer(message);
-        let len = MSG_HEADER_SIZE + message.len();
-
-        let wsize = write_full(stream, &message_copy[0..(len)], len);
-
-        println!("WRITE: {} {}", wsize, len);
-
-        wsize
-    }
-
-    // pub fn client_process(stream: &mut TcpStream, message: &[u8]) -> usize {
-    //     process_message_write(stream, message);
-
-    //     println!("Client sent: {:?} {}", message, message.len());
-
-    //     let message = process_message_read(stream);
-
-    //     println!("Client recv: {}", message);
-
-    //     0
-    // }
-
-    // pub fn server_process(stream: &mut TcpStream) -> usize {
-    //     let message = process_message_read(stream);
-
-    //     println!("Server recv: {}", message);
-
-    //     let message = format!("Server resend: {message}");
-    //     process_message_write(stream, message.as_bytes())
-    // }
 }
 
 pub mod concurrent {
 
     use crate::{
-        Connection, MAX_MSG_SIZE, MSG_HEADER_SIZE,
-        common::{get_header, process_message_write},
+        Connection, MAX_COMMANDS_SIZE, MAX_MSG_SIZE, MSG_HEADER_SIZE, PLACE_HOLDER,
+        RESPONSE_STATUS_SIZE, Response,
+        common::{get_header, get_message, read_full, write_full},
     };
     use std::{
-        io::{Read, Write},
-        mem::swap,
-        net::TcpListener,
+        io::{Read, Repeat, Write},
+        net::{TcpListener, TcpStream},
     };
 
     pub fn handle_accept(listener: &TcpListener) -> Option<Connection> {
@@ -199,7 +191,7 @@ pub mod concurrent {
         println!("Accepted new connection: {:#?}", con.1);
 
         Some(Connection {
-            stream: Some(con.0),
+            stream: con.0,
             want_read: true,
             want_write: false,
             want_close: false,
@@ -210,7 +202,8 @@ pub mod concurrent {
 
     pub fn handle_read(conn: &mut Connection) -> usize {
         let mut buf: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
-        let read_size = match conn.stream.as_ref().unwrap().read(&mut buf) {
+        // let read_size = match conn.stream.as_ref().unwrap().read(&mut buf) {
+        let read_size = match conn.stream.read(&mut buf) {
             Ok(0) => {
                 conn.want_close = true;
                 return 0;
@@ -230,6 +223,7 @@ pub mod concurrent {
             }
             Err(e) => {
                 println!("Failed to read {:?}", e);
+                conn.want_close = true;
                 return 0;
             }
         };
@@ -240,8 +234,8 @@ pub mod concurrent {
     pub fn handle_write(conn: &mut Connection) -> usize {
         let write_size = match conn
             .stream
-            .as_ref()
-            .unwrap()
+            // .as_ref()
+            // .unwrap()
             .write(conn.outgoing_data.as_slice())
         {
             Ok(0) => {
@@ -270,29 +264,37 @@ pub mod concurrent {
             return false;
         }
 
-        let len = get_header(&conn.incoming_data.as_slice()[0..MSG_HEADER_SIZE]);
-
-        if len > MAX_MSG_SIZE {
+        let commands_len = get_header(&conn.incoming_data.as_slice()[0..MSG_HEADER_SIZE]);
+        if commands_len > MAX_COMMANDS_SIZE {
             conn.want_close = true;
             return false;
         };
 
-        if MSG_HEADER_SIZE + MAX_MSG_SIZE < conn.incoming_data.len() {
+        if MAX_MSG_SIZE < conn.incoming_data.len() {
             return false;
-        };
-        println!("There: {}", len);
+        }
+        println!(
+            "CAME LEN: {:?} {} {}",
+            &conn.incoming_data,
+            commands_len,
+            conn.incoming_data.len()
+        );
 
-        let msg = str::from_utf8(
-            &conn.incoming_data.as_slice()[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + len)],
-        )
-        .unwrap_or_default();
+        let mut cmd: Vec<String> = Vec::with_capacity(commands_len);
+        let parsed_size = parse_request(conn.incoming_data.as_slice(), commands_len, &mut cmd);
+        if parsed_size == 0 {
+            conn.want_close = true;
+            return false;
+        }
+        println!("Out: {:?}", cmd);
 
-        println!("Client says: {} {:?}", len, msg);
+        let mut offset = 0usize;
+        while offset < cmd.len() {
+            let response = process_request(&cmd[offset..], &mut offset);
+            generate_response(response, &mut conn.outgoing_data);
+        }
 
-        buf_append(&mut conn.outgoing_data, &len.to_ne_bytes(), MSG_HEADER_SIZE);
-        buf_append(&mut conn.outgoing_data, &msg.as_bytes(), len);
-
-        buf_consume(&mut conn.incoming_data, MSG_HEADER_SIZE + len);
+        buf_consume(&mut conn.incoming_data, parsed_size);
 
         return true;
     }
@@ -303,6 +305,166 @@ pub mod concurrent {
 
     pub fn buf_consume(buf: &mut Vec<u8>, len: usize) {
         buf.drain(0..len);
+    }
+
+    pub fn parse_request(data: &[u8], size: usize, out: &mut Vec<String>) -> usize {
+        let mut offset = 0; //INFO: We want offset after every read from data, in order to not track some shit sizes
+        let commands_number = get_header(&data[offset..MSG_HEADER_SIZE]);
+        offset += MSG_HEADER_SIZE;
+
+        if commands_number == 0 {
+            return 0;
+        };
+
+        if commands_number > MAX_COMMANDS_SIZE {
+            return 0;
+        };
+
+        //INFO: Especially there
+        println!("Commands number: {commands_number} {}", out.len());
+        while out.len() < commands_number {
+            let command_len = get_header(&data[offset..offset + MSG_HEADER_SIZE]);
+            offset += MSG_HEADER_SIZE;
+
+            let msg = get_message(data, offset, command_len);
+            offset += command_len;
+
+            out.push(msg);
+        }
+
+        offset
+    }
+
+    pub fn send_request(stream: &mut TcpStream, commands: &Vec<&str>) -> usize {
+        let mut final_buffer = [0u8; MSG_HEADER_SIZE + MAX_MSG_SIZE];
+        final_buffer[0..MSG_HEADER_SIZE].copy_from_slice(&commands.len().to_ne_bytes());
+        let mut offset = MSG_HEADER_SIZE;
+
+        println!("BYTES: {:?} {}", &final_buffer[0..offset], commands.len());
+
+        for c in commands.iter() {
+            final_buffer[offset..offset + MSG_HEADER_SIZE].copy_from_slice(&c.len().to_ne_bytes());
+            offset += MSG_HEADER_SIZE;
+
+            final_buffer[offset..(offset + c.len())].copy_from_slice(c.as_bytes());
+            offset += c.len();
+        }
+
+        println!("SEND LEN: {offset}");
+        let wsize = write_full(stream, &final_buffer[0..offset], offset);
+        wsize
+    }
+
+    pub fn process_request(cmd: &[String], offset: &mut usize) -> Response {
+        let command = cmd[0].as_str();
+        match command {
+            "get" => {
+                println!("Processing get req: {:?}", &cmd);
+                let map = PLACE_HOLDER.lock().unwrap();
+                if !map.contains_key(cmd[1].as_str()) {
+                    *offset += 2;
+                    return Response {
+                        status: -2,
+                        data: None,
+                    };
+                };
+
+                let value = map.get(cmd[1].as_str()).unwrap();
+
+                *offset += 2;
+                Response {
+                    status: 0,
+                    data: Some(value.to_string().as_bytes().to_vec()),
+                }
+            }
+            "set" => {
+                println!("Processing set req: {:?}", &cmd);
+                let mut map = PLACE_HOLDER.lock().unwrap();
+                let value = map
+                    .insert(cmd[1].to_string(), cmd[2].to_string())
+                    .unwrap_or_else(|| cmd[2].to_string());
+
+                *offset += 3;
+                Response {
+                    status: 0,
+                    data: Some(value.as_bytes().to_vec()),
+                }
+            }
+            "del" => {
+                println!("Processing del req: {:?}", &cmd);
+                let mut map = PLACE_HOLDER.lock().unwrap();
+                let value = map.remove(cmd[1].as_str()).unwrap();
+                *offset += 2;
+                Response {
+                    status: 0,
+                    data: Some(value.as_bytes().to_vec()),
+                }
+            }
+            _ => Response {
+                status: -1,
+                data: None,
+            },
+        }
+    }
+
+    pub fn generate_response(resp: Response, out: &mut Vec<u8>) {
+        println!("Response: {:?}", resp);
+        let resp_data = match resp.data {
+            Some(r) => r,
+            None => {
+                vec![]
+            }
+        };
+
+        buf_append(
+            out,
+            &(resp_data.len() + RESPONSE_STATUS_SIZE).to_ne_bytes(),
+            MSG_HEADER_SIZE,
+        );
+        buf_append(out, &resp.status.to_ne_bytes(), RESPONSE_STATUS_SIZE);
+        buf_append(out, &resp_data, resp_data.len());
+    }
+
+    pub fn read_response(stream: &mut TcpStream) -> usize {
+        let mut bytes = [0u8; MSG_HEADER_SIZE + MAX_MSG_SIZE];
+        let rsize = read_full(stream, &mut bytes[0..MSG_HEADER_SIZE], MSG_HEADER_SIZE);
+        if rsize == 0 {
+            return 0;
+        }
+
+        let mut len_copy = [0u8; MSG_HEADER_SIZE];
+        len_copy.copy_from_slice(&bytes[0..MSG_HEADER_SIZE]);
+        let response_size = usize::from_ne_bytes(len_copy);
+
+        // println!("Data len {:?}", &bytes[0..MSG_HEADER_SIZE]);
+
+        let rsize = read_full(
+            stream,
+            &mut bytes[MSG_HEADER_SIZE..MSG_HEADER_SIZE + response_size],
+            response_size,
+        );
+
+        // println!(
+        //     "Response len {:?}",
+        //     &bytes[MSG_HEADER_SIZE..MSG_HEADER_SIZE + response_size]
+        // );
+        if rsize == 0 {
+            return 0;
+        }
+
+        let message = get_message(
+            &bytes,
+            MSG_HEADER_SIZE + RESPONSE_STATUS_SIZE,
+            response_size,
+        );
+
+        println!(
+            "Response: {}",
+            message,
+            // &bytes[MSG_HEADER_SIZE..MSG_HEADER_SIZE + RESPONSE_STATUS_SIZE]
+        );
+
+        rsize
     }
 }
 
@@ -336,6 +498,7 @@ fn main() -> Result<(), std::io::Error> {
 
             for connection in connections.iter() {
                 if connection.is_none() {
+                    println!("Connection is none");
                     continue;
                 }
 
@@ -350,7 +513,7 @@ fn main() -> Result<(), std::io::Error> {
                     events |= PollFlags::POLLOUT;
                 }
 
-                let fd = connection.stream.as_ref().unwrap().as_raw_fd();
+                let fd = connection.stream.as_raw_fd();
                 let bfd = unsafe { BorrowedFd::borrow_raw(fd) };
                 let pfd = PollFd::new(bfd, events);
 
@@ -429,32 +592,55 @@ fn main() -> Result<(), std::io::Error> {
 
         let mut stream: TcpStream = socket.into();
         let local_addr = stream.peer_addr().unwrap().to_string();
-        let mut str: Vec<u8> = vec![65; MAX_MSG_SIZE - 200];
-        str.extend_from_slice(local_addr.as_bytes());
 
-        let mut queries = vec![];
-        let msg1 = format!("Hello from client! {}", local_addr);
-        let msg2 = format!("AGAIN_Hello from client! {}", address);
-        let msg3 = format!("LAST_Hello from client! {}", address);
+        let commands = vec![
+            //
+            "get", "hello", ////
+            "set", "hello",
+            "nothing", ///
+            "get", "hello", ///
+             "get", "server", ///
+             "del", "hello",
+              "get", "hello",
+        ];
 
-        queries.push(str.as_slice());
-        queries.push(msg1.as_bytes());
-        queries.push(msg2.as_bytes());
-        queries.push(msg3.as_bytes());
+        let wsize = send_request(&mut stream, &commands);
+        println!("Wrote size: {}", wsize);
 
         loop {
-            for q in queries.iter() {
-                let wsize = process_message_write(&mut stream, q);
-                if wsize == 0 {
-                    println!("Failed to query from client");
-                }
-            }
-
-            for i in 0..queries.len() {
-                let rsize = process_message_read(&mut stream);
-                println!("Read from server: {rsize}");
+            let rsize = read_response(&mut stream);
+            println!("Read size {}", rsize);
+            if rsize == 0 {
+                break;
             }
         }
+
+        // let mut str: Vec<u8> = vec![65; MAX_MSG_SIZE - 200];
+        // str.extend_from_slice(local_addr.as_bytes());
+
+        // let mut queries = vec![];
+        // let msg1 = format!("Hello from client! {}", local_addr);
+        // let msg2 = format!("AGAIN_Hello from client! {}", address);
+        // let msg3 = format!("LAST_Hello from client! {}", address);
+
+        // queries.push(str.as_slice());
+        // queries.push(msg1.as_bytes());
+        // queries.push(msg2.as_bytes());
+        // queries.push(msg3.as_bytes());
+
+        // loop {
+        //     for q in queries.iter() {
+        //         let wsize = process_message_write(&mut stream, q);
+        //         if wsize == 0 {
+        //             println!("Failed to query from client");
+        //         }
+        //     }
+
+        //     for i in 0..queries.len() {
+        //         let rsize = process_message_read(&mut stream);
+        //         println!("Read from server:");
+        //     }
+        // }
     }
 
     Ok(())
