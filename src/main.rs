@@ -20,6 +20,7 @@ const MSG_HEADER_SIZE: usize = 8;
 const RESPONSE_STATUS_SIZE: usize = 4;
 const MAX_COMMANDS_SIZE: usize = 1024;
 
+#[derive(Debug)]
 pub struct Connection {
     stream: TcpStream,
     want_read: bool,
@@ -512,6 +513,8 @@ fn main() -> Result<(), std::io::Error> {
         let mut poll_args: Vec<PollFd> = vec![];
 
         loop {
+            println!("Conn: {:?}", &connections);
+
             poll_args.clear();
 
             let pfd = PollFd::new(bfd, PollFlags::POLLIN);
@@ -541,7 +544,7 @@ fn main() -> Result<(), std::io::Error> {
                 poll_args.push(pfd);
             }
 
-            let rv = nix::poll::poll(&mut poll_args, PollTimeout::NONE);
+            let rv = nix::poll::poll(&mut poll_args, PollTimeout::try_from(500).unwrap());
             match rv {
                 Ok(pfd) => {
                     if pfd < 0 {
@@ -561,11 +564,14 @@ fn main() -> Result<(), std::io::Error> {
                     None => continue,
                 };
 
+                println!("Accepted {} {}", connections.len(), fd);
+
                 let fd = handle.get_fd();
                 if connections.len() <= fd {
                     connections.resize_with(fd + 1, Default::default);
-                    connections[fd] = Some(handle);
                 }
+
+                connections[fd] = Some(handle);
             }
 
             for pfd_id in 1..poll_args.len() {
@@ -586,7 +592,7 @@ fn main() -> Result<(), std::io::Error> {
                             conn.take();
                         }
                     }
-                    None => todo!(),
+                    None => {}
                 }
             }
         }
@@ -613,6 +619,8 @@ fn main() -> Result<(), std::io::Error> {
 
         let mut stream: TcpStream = socket.into();
         let local_addr = stream.peer_addr().unwrap().to_string();
+
+        println!("New client: {:#?}", &stream);
 
         let hello = "hello".repeat(500 * 1024); ////
         let commands = vec![
