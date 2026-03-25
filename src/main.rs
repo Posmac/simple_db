@@ -13,7 +13,9 @@ use crate::{
     concurrent::{handle_accept, handle_read, handle_write, read_response, send_request},
 };
 
-const MAX_MSG_SIZE: usize = 65535;
+pub mod hashtable;
+
+const MAX_MSG_SIZE: usize = 4096 * 1024;
 const MSG_HEADER_SIZE: usize = 8;
 const RESPONSE_STATUS_SIZE: usize = 4;
 const MAX_COMMANDS_SIZE: usize = 1024;
@@ -175,6 +177,7 @@ pub mod concurrent {
     use std::{
         io::{Read, Repeat, Write},
         net::{TcpListener, TcpStream},
+        os::unix::process::CommandExt,
     };
 
     pub fn handle_accept(listener: &TcpListener) -> Option<Connection> {
@@ -203,12 +206,14 @@ pub mod concurrent {
     pub fn handle_read(conn: &mut Connection) -> usize {
         let mut buf: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
         // let read_size = match conn.stream.as_ref().unwrap().read(&mut buf) {
+        // let read_size = read_full(stream, bytes, size)
         let read_size = match conn.stream.read(&mut buf) {
             Ok(0) => {
                 conn.want_close = true;
                 return 0;
             }
             Ok(v) => {
+                println!("Read: {v}");
                 buf_append(&mut conn.incoming_data, &buf, v);
 
                 while try_one_request(conn) {}
@@ -264,29 +269,37 @@ pub mod concurrent {
             return false;
         }
 
-        let commands_len = get_header(&conn.incoming_data.as_slice()[0..MSG_HEADER_SIZE]);
+        let total_data_len = get_header(&conn.incoming_data.as_slice()[0..MSG_HEADER_SIZE]);
+        println!(
+            "CAME LEN: {:?} {} {}",
+            &conn.incoming_data.len(),
+            total_data_len,
+            conn.incoming_data.len()
+        );
+
+        if conn.incoming_data.len() < total_data_len {
+            return false;
+        }
+
+        if MAX_MSG_SIZE < conn.incoming_data.len() {
+            return false;
+        }
+
+        let commands_len =
+            get_header(&conn.incoming_data.as_slice()[MSG_HEADER_SIZE..MSG_HEADER_SIZE * 2]);
+
         if commands_len > MAX_COMMANDS_SIZE {
             conn.want_close = true;
             return false;
         };
 
-        if MAX_MSG_SIZE < conn.incoming_data.len() {
-            return false;
-        }
-        println!(
-            "CAME LEN: {:?} {} {}",
-            &conn.incoming_data,
-            commands_len,
-            conn.incoming_data.len()
-        );
-
         let mut cmd: Vec<String> = Vec::with_capacity(commands_len);
-        let parsed_size = parse_request(conn.incoming_data.as_slice(), commands_len, &mut cmd);
+        let parsed_size = parse_request(conn.incoming_data.as_slice(), &mut cmd);
         if parsed_size == 0 {
             conn.want_close = true;
             return false;
         }
-        println!("Out: {:?}", cmd);
+        println!("Out: {:?}", cmd.len());
 
         let mut offset = 0usize;
         while offset < cmd.len() {
@@ -307,11 +320,12 @@ pub mod concurrent {
         buf.drain(0..len);
     }
 
-    pub fn parse_request(data: &[u8], size: usize, out: &mut Vec<String>) -> usize {
+    pub fn parse_request(data: &[u8], out: &mut Vec<String>) -> usize {
         let mut offset = 0; //INFO: We want offset after every read from data, in order to not track some shit sizes
-        let commands_number = get_header(&data[offset..MSG_HEADER_SIZE]);
-        offset += MSG_HEADER_SIZE;
+        let commands_number = get_header(&data[offset + MSG_HEADER_SIZE..MSG_HEADER_SIZE * 2]);
+        offset += MSG_HEADER_SIZE * 2;
 
+        println!("Commands number: {commands_number} {}", out.len());
         if commands_number == 0 {
             return 0;
         };
@@ -321,7 +335,6 @@ pub mod concurrent {
         };
 
         //INFO: Especially there
-        println!("Commands number: {commands_number} {}", out.len());
         while out.len() < commands_number {
             let command_len = get_header(&data[offset..offset + MSG_HEADER_SIZE]);
             offset += MSG_HEADER_SIZE;
@@ -337,12 +350,12 @@ pub mod concurrent {
 
     pub fn send_request(stream: &mut TcpStream, commands: &Vec<&str>) -> usize {
         let mut final_buffer = [0u8; MSG_HEADER_SIZE + MAX_MSG_SIZE];
-        final_buffer[0..MSG_HEADER_SIZE].copy_from_slice(&commands.len().to_ne_bytes());
-        let mut offset = MSG_HEADER_SIZE;
-
-        println!("BYTES: {:?} {}", &final_buffer[0..offset], commands.len());
+        let mut offset = MSG_HEADER_SIZE * 2;
+        final_buffer[MSG_HEADER_SIZE..MSG_HEADER_SIZE + MSG_HEADER_SIZE]
+            .copy_from_slice(&commands.len().to_ne_bytes()); //set offset
 
         for c in commands.iter() {
+            println!("C: {}", c.len());
             final_buffer[offset..offset + MSG_HEADER_SIZE].copy_from_slice(&c.len().to_ne_bytes());
             offset += MSG_HEADER_SIZE;
 
@@ -351,6 +364,13 @@ pub mod concurrent {
         }
 
         println!("SEND LEN: {offset}");
+        final_buffer[0..MSG_HEADER_SIZE].copy_from_slice(&offset.to_ne_bytes()); //set offset
+        println!(
+            "BYTES: {:?} {}",
+            &final_buffer[0..offset].len(),
+            commands.len()
+        );
+
         let wsize = write_full(stream, &final_buffer[0..offset], offset);
         wsize
     }
@@ -359,7 +379,7 @@ pub mod concurrent {
         let command = cmd[0].as_str();
         match command {
             "get" => {
-                println!("Processing get req: {:?}", &cmd);
+                // println!("Processing get req: {:?}", &cmd);
                 let map = PLACE_HOLDER.lock().unwrap();
                 if !map.contains_key(cmd[1].as_str()) {
                     *offset += 2;
@@ -378,7 +398,7 @@ pub mod concurrent {
                 }
             }
             "set" => {
-                println!("Processing set req: {:?}", &cmd);
+                // println!("Processing set req: {:?}", &cmd);
                 let mut map = PLACE_HOLDER.lock().unwrap();
                 let value = map
                     .insert(cmd[1].to_string(), cmd[2].to_string())
@@ -391,7 +411,7 @@ pub mod concurrent {
                 }
             }
             "del" => {
-                println!("Processing del req: {:?}", &cmd);
+                // println!("Processing del req: {:?}", &cmd);
                 let mut map = PLACE_HOLDER.lock().unwrap();
                 let value = map.remove(cmd[1].as_str()).unwrap();
                 *offset += 2;
@@ -452,6 +472,7 @@ pub mod concurrent {
             return 0;
         }
 
+        println!("Get message 460");
         let message = get_message(
             &bytes,
             MSG_HEADER_SIZE + RESPONSE_STATUS_SIZE,
@@ -593,13 +614,21 @@ fn main() -> Result<(), std::io::Error> {
         let mut stream: TcpStream = socket.into();
         let local_addr = stream.peer_addr().unwrap().to_string();
 
+        let hello = "hello".repeat(500 * 1024); ////
         let commands = vec![
-            "get", "hello", ////
-            "set", "hello", "nothing", ////
-            "get", "hello", ////
-            "get", "server", ////
-            "del", "hello", ////
-            "get", "hello", ////
+            "get",
+            hello.as_str(),
+            "set",
+            "hello",
+            "nothing", ////
+            "get",
+            "hello", ////
+            "get",
+            "server", ////
+            "del",
+            "hello", ////
+            "get",
+            "hello", ////
         ];
 
         let wsize = send_request(&mut stream, &commands);
@@ -609,7 +638,7 @@ fn main() -> Result<(), std::io::Error> {
             let rsize = read_response(&mut stream);
             // println!("Read size {}", rsize);
             if rsize == 0 {
-                break;
+                // break;
             }
         }
 
