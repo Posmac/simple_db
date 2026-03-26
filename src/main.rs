@@ -11,9 +11,11 @@ use socket2::*;
 use crate::{
     common::process_message_read,
     concurrent::{handle_accept, handle_read, handle_write, read_response, send_request},
+    hashtable::HMap,
 };
 
 pub mod hashtable;
+pub mod redis;
 
 const MAX_MSG_SIZE: usize = 4096 * 1024;
 const MSG_HEADER_SIZE: usize = 8;
@@ -47,6 +49,7 @@ pub struct Response {
 
 static PLACE_HOLDER: LazyLock<Mutex<HashMap<String, String>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+static GLOBAL_TABLE: LazyLock<Mutex<HMap>> = LazyLock::new(|| Mutex::new(HMap::new()));
 
 pub mod common {
     use std::{
@@ -490,6 +493,113 @@ pub mod concurrent {
     }
 }
 
+pub mod redis_commands {
+    use std::{
+        alloc::{Layout, alloc, dealloc},
+        ptr::NonNull,
+    };
+
+    use crate::{
+        GLOBAL_TABLE, Response, container_of, container_of_mut,
+        hashtable::{Entry, HNode, entry_eq, str_hash},
+    };
+
+    pub fn do_get(cmd: &[String], resp: &mut Response) {
+        let key = cmd[1].to_string();
+        let mut key = Entry {
+            key: key.to_string(),
+            val: String::default(),
+            node: HNode {
+                next: None,
+                hcode: str_hash(key.as_bytes(), key.len()),
+            },
+        };
+
+        let mut table = GLOBAL_TABLE.lock().unwrap();
+        unsafe {
+            let key_ptr = Some(NonNull::new_unchecked(&mut key.node));
+            let lookup = table.lookup(key_ptr, entry_eq);
+
+            if lookup.is_null() {
+                resp.status = -10;
+                return;
+            }
+            let entry = container_of!(lookup, Entry, node);
+            match &mut resp.data {
+                Some(d) => d.extend_from_slice((*entry).val.as_bytes()),
+                None => {
+                    resp.data = Some((*entry).val.as_bytes().to_vec());
+                }
+            }
+        }
+    }
+
+    pub fn do_set(cmd: &[String], resp: &mut Response) {
+        let key = cmd[1].to_string();
+        let mut key = Entry {
+            key: key.to_string(),
+            val: String::default(),
+            node: HNode {
+                next: None,
+                hcode: str_hash(key.as_bytes(), key.len()),
+            },
+        };
+
+        unsafe {
+            let mut table = GLOBAL_TABLE.lock().unwrap();
+            let key_ptr = Some(NonNull::new_unchecked(&mut key.node));
+            let lookup = table.lookup(key_ptr, entry_eq);
+
+            if lookup.is_null() {
+                let container = container_of_mut!(lookup, Entry, node);
+                (*container).val = cmd[2].to_string();
+            } else {
+                let layout = Layout::new::<Entry>();
+                let raw = alloc(layout);
+
+                if raw.is_null() {
+                    resp.status = -20;
+                    return;
+                }
+                let entry = raw as *mut Entry;
+
+                (*entry).key = cmd[1].to_string();
+                (*entry).val = cmd[2].to_string();
+                (*entry).node = key.node;
+                table.insert(NonNull::new_unchecked(&mut (*entry).node));
+            }
+        }
+    }
+
+    pub fn do_del(cmd: &[String], resp: &mut Response) {
+        let key = cmd[1].to_string();
+        let mut key = Entry {
+            key: key.to_string(),
+            val: String::default(),
+            node: HNode {
+                next: None,
+                hcode: str_hash(key.as_bytes(), key.len()),
+            },
+        };
+
+        unsafe {
+            let mut table = GLOBAL_TABLE.lock().unwrap();
+            let node = table.delete(Some(NonNull::new_unchecked(&mut key.node)), entry_eq);
+
+            if node.is_none() {
+                return;
+            }
+
+            let ptr = node.as_ref().unwrap().as_ptr();
+            if !ptr.is_null() {
+                let layout = Layout::new::<Entry>();
+                let entry_ptr = container_of_mut!(ptr, Entry, node);
+                dealloc(entry_ptr as *mut u8, layout);
+            }
+        }
+    }
+}
+
 #[allow(unreachable_code)]
 fn main() -> Result<(), std::io::Error> {
     #[cfg(feature = "server")]
@@ -679,10 +789,4 @@ fn main() -> Result<(), std::io::Error> {
     }
 
     Ok(())
-}
-
-pub mod test {
-    #[test]
-    #[cfg(feature = "client")]
-    pub fn multiple_connections() {}
 }
