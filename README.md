@@ -6,6 +6,13 @@ This is a learning project in Rust to build a minimal in-memory key-value store 
 The goal is to practice systems programming concepts: UNSAFE RUST, manual memory management, data structures, TCP networking, and multithreading.  
 Based on [Build Your Own Redis](https://build-your-own.org/redis/).
 
+### The Foundation
+This project isn't just a wrapper; it's a deep-dive into the internals of Redis:
+- **Intrusive Structures:** We don't store data *in* the map; we embed the map *into* our data. This minimizes pointers and enhances cache locality.
+- **Pointer-to-Pointer Lookup:** Our lookup returns an indirect pointer `**Node`, enabling clean $O(1)$ deletions without searching for the predecessor.
+- **Non-blocking I/O:** Built on top of an event loop to handle concurrent connections efficiently.
+- **Memory Control:** Full ownership of the memory lifecycle via manual allocations and explicit `drop_in_place` calls.
+
 ---
 ## Features
 
