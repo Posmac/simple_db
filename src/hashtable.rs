@@ -287,7 +287,7 @@ impl HTable {
 pub mod tests {
 
     use std::{
-        alloc::{Layout, alloc},
+        alloc::{Layout, alloc, dealloc},
         ptr::{self, NonNull, null_mut},
     };
 
@@ -332,31 +332,47 @@ pub mod tests {
         null_mut()
     }
 
-    #[test]
-    #[should_panic(expected = "capacity must be power of two and non zero")]
-    fn test_table_zero_capacity() {
-        let zero_table = HMap::with_capacity(0);
-        let not_power_of_two_table = HMap::with_capacity(3);
+    pub fn free_entry(node_ptr: NodePtr) {
+        unsafe {
+            let entry_ptr = container_of!(node_ptr.as_ptr(), Entry, node) as *mut Entry;
+            ptr::drop_in_place(entry_ptr);
+            let layout = Layout::new::<Entry>();
+            dealloc(entry_ptr as *mut u8, layout);
+        }
     }
 
     #[test]
-    pub fn test_creation_empty() {
+    pub fn test_basic_insert_and_lookup_and_delete() {}
+
+    /// Test if the map initializes with correct sizes and null pointers.
+    #[test]
+    fn test_initialization() {
+        // TODO: Create a new HMap and assert that size is 0 and buckets are null-initialized.
         let default = HMap::new();
-
-        println!("Info: {:#?}", &default);
-
         assert!(
-            default.current.size == 0 && default.current.mask == DEFAULT_HASH_SIZE - 1,
+            default.current.size == 0 && default.current.mask == default.current.size - 1,
             "New current hashtable size != 0"
         );
         assert!(
-            default.older.size == 0 && default.older.mask == DEFAULT_HASH_SIZE - 1,
+            default.older.size == 0 && default.older.mask == default.current.size - 1,
             "New older hashtable size != 0"
         );
     }
 
+    /// Test if the map initialization with capacity which is not power of two
     #[test]
-    pub fn test_basic_insert_and_lookup() {
+    #[should_panic(expected = "capacity must be power of two and non zero")]
+    fn test_panic_capacity_wrong() {
+        // TODO: Create a zero cap table and table with the size of now power of 2
+        let zero_table = HMap::with_capacity(0);
+        let not_power_of_two_table = HMap::with_capacity(3);
+    }
+
+    /// Test basic insertion and retrieval of a single node.
+    #[test]
+    fn test_single_insert_and_lookup() {
+        // TODO: Create one node, insert it, and verify lookup returns the correct pointer.
+        // Remember to free memory at the end.
         let mut default = HMap::new();
 
         let data = vec![112u8; 1];
@@ -366,9 +382,92 @@ pub mod tests {
         default.insert(node);
 
         unsafe {
+            //lookup
             let entry = container_of!(node.as_ptr(), Entry, node);
             let lookup = default.lookup(Some(node), entry_eq);
-            if !lookup.is_null() {}
+            if !lookup.is_null() {
+                let fentry = get_entry_from_dp(lookup);
+                println!("LOOKUP: FE: {:#?}, E: {:#?}", *entry, *fentry);
+            }
+
+            //delete
+            let node_to_free = default.delete(Some(node), entry_eq);
+            if let Some(ptr) = node_to_free {
+                let entry_to_free = &*container_of!(ptr.as_ptr(), Entry, node);
+                println!("DELETED: {:#?}", entry_to_free);
+                free_entry(ptr);
+            } else {
+                println!("Нода не найдена, удалять нечего");
+            }
         }
+    }
+
+    /// Test handling of hash collisions (multiple nodes in the same bucket).
+    #[test]
+    fn test_collision_chains() {
+        // TODO:
+        // 1. Create 3 nodes with the SAME hcode (to force them into one bucket).
+        // 2. Insert all three.
+        // 3. Verify that lookup can find the "tail" (the first inserted node)
+        //    by traversing the 'next' pointers.
+        // 4. Verify size count is 3.
+    }
+
+    /// Test deleting a node that is at the head of a collision chain.
+    #[test]
+    fn test_delete_chain_head() {
+        // TODO:
+        // 1. Insert 2 nodes into the same bucket.
+        // 2. Delete the last inserted node (the current head).
+        // 3. Verify that the bucket now points to the remaining node.
+    }
+
+    /// Test deleting a node from the middle or end of a collision chain.
+    #[test]
+    fn test_delete_chain_middle_and_tail() {
+        // TODO:
+        // 1. Insert 3 nodes into the same bucket (A -> B -> C).
+        // 2. Delete the middle node (B).
+        // 3. Verify that A's 'next' now points to C.
+        // 4. Delete the tail node (C).
+        // 5. Verify that A's 'next' is now None.
+    }
+
+    /// Test lookup behavior when the key does not exist in the map.
+    #[test]
+    fn test_lookup_missing_key() {
+        // TODO:
+        // 1. Insert some nodes.
+        // 2. Perform a lookup with a key/hcode that was never inserted.
+        // 3. Assert that lookup returns null_mut().
+    }
+
+    /// Test re-inserting the same node pointer (logic check).
+    #[test]
+    fn test_duplicate_node_pointer() {
+        // TODO:
+        // 1. Insert a node.
+        // 2. Insert the SAME node pointer again.
+        // 3. Decide if your implementation handles this (usually size increases,
+        //    but it might create a circular reference if not careful).
+    }
+
+    /// Stress test for memory leaks and pointer stability.
+    #[test]
+    fn test_stress_insert_delete() {
+        // TODO:
+        // 1. In a loop (e.g., 1000 iterations), insert nodes with different keys.
+        // 2. In another loop, delete them all.
+        // 3. Verify size returns to 0.
+        // Run this test with 'cargo miri test' to detect leaks.
+    }
+
+    /// Test if lookup correctly checks both 'current' and 'older' tables during resizing.
+    #[test]
+    fn test_lookup_during_resizing() {
+        // TODO:
+        // 1. Manually move a node to the 'older' table.
+        // 2. Perform a lookup via HMap.
+        // 3. Verify that HMap finds it even if it's not in the 'current' table.
     }
 }

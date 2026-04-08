@@ -47,9 +47,9 @@ pub struct Response {
     pub data: Option<Vec<u8>>,
 }
 
-// static PLACE_HOLDER: LazyLock<Mutex<HashMap<String, String>>> =
-//     LazyLock::new(|| Mutex::new(HashMap::new()));
 static GLOBAL_TABLE: LazyLock<Mutex<HMap>> = LazyLock::new(|| Mutex::new(HMap::new()));
+
+// pub fn free_global_table(map: HMap) {}
 
 pub mod common {
     use std::{
@@ -375,34 +375,16 @@ pub mod concurrent {
         match command {
             "get" => {
                 println!("Processing get req: {:?}", &cmd);
-                // let map = PLACE_HOLDER.lock().unwrap();
-                // if !map.contains_key(cmd[1].as_str()) {
-                //     *offset += 2;
-                //     return Response {
-                //         status: -2,
-                //         data: None,
-                //     };
-                // };
-
-                // let value = map.get(cmd[1].as_str()).unwrap();
-
                 *offset += 2;
                 do_get(cmd)
             }
             "set" => {
                 println!("Processing set req: {:?}", &cmd);
-                // let mut map = PLACE_HOLDER.lock().unwrap();
-                // let value = map
-                //     .insert(cmd[1].to_string(), cmd[2].to_string())
-                //     .unwrap_or_else(|| cmd[2].to_string());
-
                 *offset += 3;
                 do_set(cmd)
             }
             "del" => {
                 println!("Processing del req: {:?}", &cmd);
-                // let mut map = PLACE_HOLDER.lock().unwrap();
-                // let value = map.remove(cmd[1].as_str()).unwrap();
                 *offset += 2;
                 do_del(cmd)
             }
