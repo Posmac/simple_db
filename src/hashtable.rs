@@ -2,9 +2,6 @@ use std::ptr::NonNull;
 
 pub type LookUpFunction = fn(&Bucket, &Bucket) -> bool;
 
-type NodePtr = NonNull<HNode>;
-type Bucket = Option<NodePtr>;
-
 const MAX_LOAD_FACTOR: usize = 8;
 const REHASHING_WORK_SIZE: usize = 128;
 const DEFAULT_HASH_SIZE: usize = 2;
@@ -33,6 +30,9 @@ macro_rules! container_of_mut {
     }};
 }
 
+type NodePtr = NonNull<HNode>;
+type Bucket = Option<NodePtr>;
+
 #[derive(Debug)]
 #[repr(C)]
 pub struct Entry {
@@ -50,7 +50,7 @@ pub struct HMap {
     migrate_pos: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 #[repr(C)]
 pub struct HNode {
     pub next: Bucket, //Option<NonNull<HNode>>;
@@ -172,9 +172,7 @@ impl HMap {
 impl Drop for HTable {
     fn drop(&mut self) {
         unsafe {
-            if !self.buckets.as_ptr().is_null() {
-                libc::free(self.buckets.as_ptr() as *mut libc::c_void);
-            }
+            libc::free(self.buckets.as_ptr() as *mut libc::c_void);
         }
     }
 }
@@ -194,7 +192,7 @@ impl HTable {
         let void_ptr = unsafe { libc::calloc(size, std::mem::size_of::<Bucket>()) };
         assert!(!void_ptr.is_null(), "Allocatin failed");
 
-        let buckets_vec_ptr = void_ptr as *mut Bucket;
+        let buckets_vec_ptr = void_ptr as *mut Bucket; // При создании таблицы:
 
         Self {
             //INFO: Unsafe
@@ -288,66 +286,89 @@ impl HTable {
 //INFO: use cargo test -- --nocapture
 pub mod tests {
 
-    //     use std::{
-    //         alloc::{Layout, alloc},
-    //         ptr::NonNull,
-    //     };
+    use std::{
+        alloc::{Layout, alloc},
+        ptr::{self, NonNull, null_mut},
+    };
 
-    //     use crate::hashtable::{DEFAULT_HASH_SIZE, HMap, HNode, HTable, str_hash};
+    use crate::hashtable::{
+        DEFAULT_HASH_SIZE, Entry, HMap, HNode, HTable, NodePtr, entry_eq, str_hash,
+    };
 
-    //     #[test]
-    //     #[should_panic(expected = "capacity must be power of two and non zero")]
-    //     fn test_table_zero_capacity() {
-    //         let zero_table = HMap::with_capacity(0);
-    //         let not_power_of_two_table = HMap::with_capacity(3);
-    //     }
+    pub fn create_node(key: &str, value: &str, hash: usize) -> NodePtr {
+        let layout = Layout::new::<Entry>();
+        unsafe {
+            let raw = alloc(layout) as *mut Entry;
 
-    //     #[test]
-    //     pub fn test_creation() {
-    //         let default = HMap::new();
+            if raw.is_null() {
+                panic!("Memory allocation failed");
+            }
 
-    //         println!("Info: {:#?}", &default);
+            ptr::write(ptr::addr_of_mut!((*raw).key), key.to_string());
+            ptr::write(ptr::addr_of_mut!((*raw).val), value.to_string());
+            ptr::write(
+                ptr::addr_of_mut!((*raw).node),
+                HNode {
+                    next: None,
+                    hcode: hash,
+                },
+            );
 
-    //         assert!(
-    //             default.current.size == 0 && default.current.mask == DEFAULT_HASH_SIZE - 1,
-    //             "New current hashtable size != 0"
-    //         );
-    //         assert!(
-    //             default.older.size == 0 && default.older.mask == DEFAULT_HASH_SIZE - 1,
-    //             "New older hashtable size != 0"
-    //         );
-    //     }
+            let node_ptr = std::ptr::addr_of_mut!((*raw).node);
+            NonNull::new_unchecked(node_ptr)
+        }
+    }
 
-    //     #[test]
-    //     pub fn test_basic() {
-    //         let mut default = HMap::new();
-    //         // println!("Inf: {:#?}", &default);
+    //double pointer ()
+    pub fn get_entry_from_dp(ptr: *const Option<NodePtr>) -> *const Entry {
+        unsafe {
+            if let Some(node_ptr) = *ptr {
+                let fentry = container_of!(node_ptr.as_ptr(), Entry, node);
+                // println!("Найдено: fe={:#?}, e={:#?}", *fentry, *entry);
+                return fentry;
+            }
+        }
 
-    //         let data = vec![112u8; 1];
-    //         let hash = str_hash(&data, data.len());
+        null_mut()
+    }
 
-    //         unsafe {
-    //             let layout = Layout::new::<HNode>();
-    //             let raw = alloc(layout) as *mut HNode;
+    #[test]
+    #[should_panic(expected = "capacity must be power of two and non zero")]
+    fn test_table_zero_capacity() {
+        let zero_table = HMap::with_capacity(0);
+        let not_power_of_two_table = HMap::with_capacity(3);
+    }
 
-    //             if raw.is_null() {
-    //                 panic!("Memory allocation failed");
-    //             }
+    #[test]
+    pub fn test_creation_empty() {
+        let default = HMap::new();
 
-    //             let new_node = HNode {
-    //                 next: None,
-    //                 hcode: hash,
-    //             };
+        println!("Info: {:#?}", &default);
 
-    //             std::ptr::write(raw, new_node);
+        assert!(
+            default.current.size == 0 && default.current.mask == DEFAULT_HASH_SIZE - 1,
+            "New current hashtable size != 0"
+        );
+        assert!(
+            default.older.size == 0 && default.older.mask == DEFAULT_HASH_SIZE - 1,
+            "New older hashtable size != 0"
+        );
+    }
 
-    //             default.insert(NonNull::new_unchecked(raw));
-    //         }
+    #[test]
+    pub fn test_basic_insert_and_lookup() {
+        let mut default = HMap::new();
 
-    //         // let node = default.lookup(key, f);
-    //         // println!("Inf after: {:#?}", &default);
-    //     }
+        let data = vec![112u8; 1];
+        let hash = str_hash(&data, data.len());
 
-    //     #[test]
-    //     pub fn test_rehash() {}
+        let node = create_node("key_1", "val_1", hash);
+        default.insert(node);
+
+        unsafe {
+            let entry = container_of!(node.as_ptr(), Entry, node);
+            let lookup = default.lookup(Some(node), entry_eq);
+            if !lookup.is_null() {}
+        }
+    }
 }

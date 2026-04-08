@@ -47,8 +47,8 @@ pub struct Response {
     pub data: Option<Vec<u8>>,
 }
 
-static PLACE_HOLDER: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+// static PLACE_HOLDER: LazyLock<Mutex<HashMap<String, String>>> =
+//     LazyLock::new(|| Mutex::new(HashMap::new()));
 static GLOBAL_TABLE: LazyLock<Mutex<HMap>> = LazyLock::new(|| Mutex::new(HMap::new()));
 
 pub mod common {
@@ -135,16 +135,6 @@ pub mod common {
         message.to_string()
     }
 
-    // pub fn generate_message_buffer(message: &[u8]) -> [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] {
-    //     let mut buffer: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
-
-    //     let message_len_bytes = message.len().to_ne_bytes();
-    //     buffer[0..MSG_HEADER_SIZE].copy_from_slice(&message_len_bytes);
-    //     buffer[MSG_HEADER_SIZE..(MSG_HEADER_SIZE + message.len())].copy_from_slice(message);
-
-    //     buffer
-    // }
-
     pub fn process_message_read(stream: &mut TcpStream) -> String {
         let mut buffer: [u8; MAX_MSG_SIZE + MSG_HEADER_SIZE] = [0; MAX_MSG_SIZE + MSG_HEADER_SIZE];
         let read_size = read_full(stream, &mut buffer[0..MSG_HEADER_SIZE], MSG_HEADER_SIZE);
@@ -174,9 +164,10 @@ pub mod common {
 pub mod concurrent {
 
     use crate::{
-        Connection, MAX_COMMANDS_SIZE, MAX_MSG_SIZE, MSG_HEADER_SIZE, PLACE_HOLDER,
-        RESPONSE_STATUS_SIZE, Response,
+        Connection, MAX_COMMANDS_SIZE, MAX_MSG_SIZE, MSG_HEADER_SIZE, RESPONSE_STATUS_SIZE,
+        Response,
         common::{get_header, get_message, read_full, write_full},
+        redis_commands::{do_del, do_get, do_set},
     };
     use std::{
         io::{Read, Repeat, Write},
@@ -383,46 +374,37 @@ pub mod concurrent {
         let command = cmd[0].as_str();
         match command {
             "get" => {
-                // println!("Processing get req: {:?}", &cmd);
-                let map = PLACE_HOLDER.lock().unwrap();
-                if !map.contains_key(cmd[1].as_str()) {
-                    *offset += 2;
-                    return Response {
-                        status: -2,
-                        data: None,
-                    };
-                };
+                println!("Processing get req: {:?}", &cmd);
+                // let map = PLACE_HOLDER.lock().unwrap();
+                // if !map.contains_key(cmd[1].as_str()) {
+                //     *offset += 2;
+                //     return Response {
+                //         status: -2,
+                //         data: None,
+                //     };
+                // };
 
-                let value = map.get(cmd[1].as_str()).unwrap();
+                // let value = map.get(cmd[1].as_str()).unwrap();
 
                 *offset += 2;
-                Response {
-                    status: 0,
-                    data: Some(value.to_string().as_bytes().to_vec()),
-                }
+                do_get(cmd)
             }
             "set" => {
-                // println!("Processing set req: {:?}", &cmd);
-                let mut map = PLACE_HOLDER.lock().unwrap();
-                let value = map
-                    .insert(cmd[1].to_string(), cmd[2].to_string())
-                    .unwrap_or_else(|| cmd[2].to_string());
+                println!("Processing set req: {:?}", &cmd);
+                // let mut map = PLACE_HOLDER.lock().unwrap();
+                // let value = map
+                //     .insert(cmd[1].to_string(), cmd[2].to_string())
+                //     .unwrap_or_else(|| cmd[2].to_string());
 
                 *offset += 3;
-                Response {
-                    status: 0,
-                    data: Some(value.as_bytes().to_vec()),
-                }
+                do_set(cmd)
             }
             "del" => {
-                // println!("Processing del req: {:?}", &cmd);
-                let mut map = PLACE_HOLDER.lock().unwrap();
-                let value = map.remove(cmd[1].as_str()).unwrap();
+                println!("Processing del req: {:?}", &cmd);
+                // let mut map = PLACE_HOLDER.lock().unwrap();
+                // let value = map.remove(cmd[1].as_str()).unwrap();
                 *offset += 2;
-                Response {
-                    status: 0,
-                    data: Some(value.as_bytes().to_vec()),
-                }
+                do_del(cmd)
             }
             _ => Response {
                 status: -1,
@@ -504,7 +486,9 @@ pub mod redis_commands {
         hashtable::{Entry, HNode, entry_eq, str_hash},
     };
 
-    pub fn do_get(cmd: &[String], resp: &mut Response) {
+    pub fn do_get(cmd: &[String]) -> Response {
+        let mut resp = Response::default();
+
         let key = cmd[1].to_string();
         let mut key = Entry {
             key: key.to_string(),
@@ -522,7 +506,7 @@ pub mod redis_commands {
 
             if lookup.is_null() {
                 resp.status = -10;
-                return;
+                return resp;
             }
             let entry = container_of!(lookup, Entry, node);
             match &mut resp.data {
@@ -531,10 +515,13 @@ pub mod redis_commands {
                     resp.data = Some((*entry).val.as_bytes().to_vec());
                 }
             }
-        }
+        };
+
+        resp
     }
 
-    pub fn do_set(cmd: &[String], resp: &mut Response) {
+    pub fn do_set(cmd: &[String]) -> Response {
+        let mut resp = Response::default();
         let key = cmd[1].to_string();
         let mut key = Entry {
             key: key.to_string(),
@@ -559,7 +546,7 @@ pub mod redis_commands {
 
                 if raw.is_null() {
                     resp.status = -20;
-                    return;
+                    return resp;
                 }
                 let entry = raw as *mut Entry;
 
@@ -568,10 +555,13 @@ pub mod redis_commands {
                 (*entry).node = key.node;
                 table.insert(NonNull::new_unchecked(&mut (*entry).node));
             }
-        }
+        };
+
+        resp
     }
 
-    pub fn do_del(cmd: &[String], resp: &mut Response) {
+    pub fn do_del(cmd: &[String]) -> Response {
+        let mut resp = Response::default();
         let key = cmd[1].to_string();
         let mut key = Entry {
             key: key.to_string(),
@@ -587,7 +577,7 @@ pub mod redis_commands {
             let node = table.delete(Some(NonNull::new_unchecked(&mut key.node)), entry_eq);
 
             if node.is_none() {
-                return;
+                return resp;
             }
 
             let ptr = node.as_ref().unwrap().as_ptr();
@@ -596,7 +586,9 @@ pub mod redis_commands {
                 let entry_ptr = container_of_mut!(ptr, Entry, node);
                 dealloc(entry_ptr as *mut u8, layout);
             }
-        }
+        };
+
+        resp
     }
 }
 
