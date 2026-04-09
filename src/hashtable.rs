@@ -1,6 +1,7 @@
-use std::ptr::NonNull;
-
-use libc::xsw_usage;
+use std::{
+    alloc::{Layout, alloc, dealloc},
+    ptr::{self, NonNull, null_mut},
+};
 
 pub type LookUpFunction = fn(&Bucket, &Bucket) -> bool;
 
@@ -32,8 +33,8 @@ macro_rules! container_of_mut {
     }};
 }
 
-type NodePtr = NonNull<HNode>;
-type Bucket = Option<NodePtr>;
+pub type NodePtr = NonNull<HNode>;
+pub type Bucket = Option<NodePtr>;
 
 #[derive(Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
@@ -93,6 +94,74 @@ pub fn entry_eq_kv(lhs: &Bucket, rhs: &Bucket) -> bool {
         let rhs = container_of!(rhs.as_ref().unwrap().as_ptr(), Entry, node);
         return (*lhs).key.eq(&(*rhs).key) && (*lhs).val.eq(&(*rhs).val);
     }
+}
+
+pub fn create_node(key: &str, value: &str) -> NodePtr {
+    let hash = str_hash(key.as_bytes());
+    let layout = Layout::new::<Entry>();
+    unsafe {
+        let raw = alloc(layout) as *mut Entry;
+
+        if raw.is_null() {
+            panic!("Memory allocation failed");
+        }
+
+        ptr::write(ptr::addr_of_mut!((*raw).key), key.to_string());
+        ptr::write(ptr::addr_of_mut!((*raw).val), value.to_string());
+        ptr::write(
+            ptr::addr_of_mut!((*raw).node),
+            HNode {
+                next: None,
+                hcode: hash,
+            },
+        );
+
+        let node_ptr = std::ptr::addr_of_mut!((*raw).node);
+        NonNull::new_unchecked(node_ptr)
+    }
+}
+
+//double pointer ()
+pub fn get_entry_from_dp(ptr: *const Option<NodePtr>) -> *const Entry {
+    unsafe {
+        if let Some(node_ptr) = *ptr {
+            let fentry = container_of!(node_ptr.as_ptr(), Entry, node);
+            // println!("Найдено: fe={:#?}, e={:#?}", *fentry, *entry);
+            return fentry;
+        }
+    }
+
+    null_mut()
+}
+
+pub fn free_entry(node_ptr: NodePtr) {
+    unsafe {
+        let entry_ptr = container_of!(node_ptr.as_ptr(), Entry, node) as *mut Entry;
+        ptr::drop_in_place(entry_ptr);
+        let layout = Layout::new::<Entry>();
+        dealloc(entry_ptr as *mut u8, layout);
+    }
+}
+
+fn clear_nodes_by_key(map: &mut HMap, template_node: Bucket, initial_size: usize) {
+    println!("LOG: Starting chain cleanup {}...", map.current.size);
+    let mut deleted_count = 0;
+
+    unsafe {
+        while let Some(ptr) = map.delete(template_node, entry_eq) {
+            let entry = container_of!(ptr.as_ptr(), Entry, node);
+            println!("LOG: Freeing node with value: '{}'", (*entry).val);
+            free_entry(ptr);
+            deleted_count += 1;
+        }
+    }
+
+    assert_eq!(
+        deleted_count, initial_size,
+        "FAILED: Expected to delete {} nodes, but deleted {}",
+        initial_size, deleted_count
+    );
+    assert_eq!(map.current.size, 0, "Table should be empty after cleanup");
 }
 
 impl HMap {
@@ -335,77 +404,9 @@ pub mod tests {
     use libc::free;
 
     use crate::hashtable::{
-        Bucket, DEFAULT_HASH_SIZE, Entry, HMap, HNode, HTable, NodePtr, entry_eq, entry_eq_kv,
-        str_hash,
+        Bucket, DEFAULT_HASH_SIZE, Entry, HMap, HNode, HTable, NodePtr, clear_nodes_by_key,
+        create_node, entry_eq, entry_eq_kv, free_entry, get_entry_from_dp, str_hash,
     };
-
-    pub fn create_node(key: &str, value: &str) -> NodePtr {
-        let hash = str_hash(key.as_bytes());
-        let layout = Layout::new::<Entry>();
-        unsafe {
-            let raw = alloc(layout) as *mut Entry;
-
-            if raw.is_null() {
-                panic!("Memory allocation failed");
-            }
-
-            ptr::write(ptr::addr_of_mut!((*raw).key), key.to_string());
-            ptr::write(ptr::addr_of_mut!((*raw).val), value.to_string());
-            ptr::write(
-                ptr::addr_of_mut!((*raw).node),
-                HNode {
-                    next: None,
-                    hcode: hash,
-                },
-            );
-
-            let node_ptr = std::ptr::addr_of_mut!((*raw).node);
-            NonNull::new_unchecked(node_ptr)
-        }
-    }
-
-    //double pointer ()
-    pub fn get_entry_from_dp(ptr: *const Option<NodePtr>) -> *const Entry {
-        unsafe {
-            if let Some(node_ptr) = *ptr {
-                let fentry = container_of!(node_ptr.as_ptr(), Entry, node);
-                // println!("Найдено: fe={:#?}, e={:#?}", *fentry, *entry);
-                return fentry;
-            }
-        }
-
-        null_mut()
-    }
-
-    pub fn free_entry(node_ptr: NodePtr) {
-        unsafe {
-            let entry_ptr = container_of!(node_ptr.as_ptr(), Entry, node) as *mut Entry;
-            ptr::drop_in_place(entry_ptr);
-            let layout = Layout::new::<Entry>();
-            dealloc(entry_ptr as *mut u8, layout);
-        }
-    }
-
-    fn clear_nodes_by_key(map: &mut HMap, template_node: Bucket, initial_size: usize) {
-        println!("LOG: Starting chain cleanup {}...", map.current.size);
-        let mut deleted_count = 0;
-
-        unsafe {
-            while let Some(ptr) = map.delete(template_node, entry_eq) {
-                let entry = container_of!(ptr.as_ptr(), Entry, node);
-                println!("LOG: Freeing node with value: '{}'", (*entry).val);
-                free_entry(ptr);
-                deleted_count += 1;
-            }
-        }
-
-        assert_eq!(
-            deleted_count, initial_size,
-            "FAILED: Expected to delete {} nodes, but deleted {}",
-            initial_size, deleted_count
-        );
-        assert_eq!(map.current.size, 0, "Table should be empty after cleanup");
-    }
 
     /// Test if the map initializes with correct sizes and null pointers.
     #[test]

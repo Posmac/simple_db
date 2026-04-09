@@ -1,3 +1,4 @@
+use core::default;
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr, SocketAddrV4, TcpListener, TcpStream},
@@ -42,14 +43,32 @@ impl Connection {
 }
 
 #[derive(Default, Debug)]
+#[repr(i32)]
+pub enum ResponseCode {
+    #[default]
+    Ok = 0,
+    Error = 1,
+    SetNew = 2,
+    SetExisting = 3,
+    GetExisting = 4,
+    GetNothing = 5,
+    DelOk = 6,
+    DelNothing = 7,
+}
+
+impl ResponseCode {
+    pub fn to_ne_bytes(self) -> [u8; 4] {
+        (self as i32).to_ne_bytes()
+    }
+}
+
+#[derive(Default, Debug)]
 pub struct Response {
-    pub status: i32,
+    pub status: ResponseCode,
     pub data: Option<Vec<u8>>,
 }
 
-static GLOBAL_TABLE: LazyLock<Mutex<HMap>> = LazyLock::new(|| Mutex::new(HMap::new()));
-
-// pub fn free_global_table(map: HMap) {}
+pub static GLOBAL_TABLE: LazyLock<Mutex<HMap>> = LazyLock::new(|| Mutex::new(HMap::new()));
 
 pub mod common {
     use std::{
@@ -389,7 +408,7 @@ pub mod concurrent {
                 do_del(cmd)
             }
             _ => Response {
-                status: -1,
+                status: crate::ResponseCode::Error,
                 data: None,
             },
         }
@@ -424,33 +443,25 @@ pub mod concurrent {
         len_copy.copy_from_slice(&bytes[0..MSG_HEADER_SIZE]);
         let response_size = usize::from_ne_bytes(len_copy);
 
-        // println!("Data len {:?}", &bytes[0..MSG_HEADER_SIZE]);
-
         let rsize = read_full(
             stream,
             &mut bytes[MSG_HEADER_SIZE..MSG_HEADER_SIZE + response_size],
             response_size,
         );
-
-        // println!(
-        //     "Response len {:?}",
-        //     &bytes[MSG_HEADER_SIZE..MSG_HEADER_SIZE + response_size]
-        // );
         if rsize == 0 {
             return 0;
         }
 
-        println!("Get message 460");
-        let message = get_message(
-            &bytes,
-            MSG_HEADER_SIZE + RESPONSE_STATUS_SIZE,
-            response_size,
-        );
+        let message = get_message(&bytes, MSG_HEADER_SIZE, response_size);
+
+        let mut status_code = [0u8; 4];
+        status_code
+            .copy_from_slice(&bytes[MSG_HEADER_SIZE..MSG_HEADER_SIZE + RESPONSE_STATUS_SIZE]);
 
         println!(
-            "Response: {}",
+            "Response: \n\t data {} \n\t code: {}",
             message,
-            // &bytes[MSG_HEADER_SIZE..MSG_HEADER_SIZE + RESPONSE_STATUS_SIZE]
+            i32::from_ne_bytes(status_code),
         );
 
         rsize
@@ -458,117 +469,92 @@ pub mod concurrent {
 }
 
 pub mod redis_commands {
-    use std::{
-        alloc::{Layout, alloc, dealloc},
-        ptr::NonNull,
-    };
-
     use crate::{
-        GLOBAL_TABLE, Response, container_of, container_of_mut,
-        hashtable::{Entry, HNode, entry_eq, str_hash},
+        GLOBAL_TABLE, Response, ResponseCode, container_of, container_of_mut,
+        hashtable::{Entry, NodePtr, create_node, entry_eq, free_entry},
     };
 
     pub fn do_get(cmd: &[String]) -> Response {
         let mut resp = Response::default();
+        let key = &cmd[1];
 
-        let key = cmd[1].to_string();
-        let mut key = Entry {
-            key: key.to_string(),
-            val: String::default(),
-            node: HNode {
-                next: None,
-                hcode: str_hash(key.as_bytes()),
-            },
-        };
+        let v = String::default();
+        let entry: NodePtr = create_node(key, v.as_str());
 
-        let mut table = GLOBAL_TABLE.lock().unwrap();
         unsafe {
-            let key_ptr = Some(NonNull::new_unchecked(&mut key.node));
-            let lookup = table.lookup(key_ptr, entry_eq);
+            let mut table = GLOBAL_TABLE.lock().unwrap();
+            let lookup = table.lookup(Some(entry), entry_eq);
 
-            if lookup.is_null() {
-                resp.status = -10;
-                return resp;
-            }
-            let entry = container_of!(lookup, Entry, node);
-            match &mut resp.data {
-                Some(d) => d.extend_from_slice((*entry).val.as_bytes()),
-                None => {
-                    resp.data = Some((*entry).val.as_bytes().to_vec());
+            if !lookup.is_null() {
+                if let Some(ptr) = *lookup {
+                    let container = container_of_mut!(ptr.as_ptr(), Entry, node);
+                    resp.status = ResponseCode::GetExisting;
+                    resp.data = Some((*container).val.as_bytes().to_vec());
                 }
+            } else {
+                resp.status = ResponseCode::GetNothing;
             }
         };
+
+        free_entry(entry);
 
         resp
     }
 
     pub fn do_set(cmd: &[String]) -> Response {
         let mut resp = Response::default();
-        let key = cmd[1].to_string();
-        let mut key = Entry {
-            key: key.to_string(),
-            val: String::default(),
-            node: HNode {
-                next: None,
-                hcode: str_hash(key.as_bytes()),
-            },
-        };
+        let key = &cmd[1];
+
+        let v = String::default();
+        let entry: NodePtr = create_node(key, v.as_str());
 
         unsafe {
             let mut table = GLOBAL_TABLE.lock().unwrap();
-            let key_ptr = Some(NonNull::new_unchecked(&mut key.node));
-            let lookup = table.lookup(key_ptr, entry_eq);
+            let lookup = table.lookup(Some(entry), entry_eq);
 
-            if lookup.is_null() {
-                let container = container_of_mut!(lookup, Entry, node);
-                (*container).val = cmd[2].to_string();
-            } else {
-                let layout = Layout::new::<Entry>();
-                let raw = alloc(layout);
-
-                if raw.is_null() {
-                    resp.status = -20;
-                    return resp;
+            if !lookup.is_null() {
+                if let Some(ptr) = *lookup {
+                    let container = container_of_mut!(ptr.as_ptr(), Entry, node);
+                    (*container).val = cmd[2].to_string();
+                    resp.status = ResponseCode::SetExisting;
+                    resp.data = Some(cmd[2].as_bytes().to_vec());
                 }
-                let entry = raw as *mut Entry;
-
-                (*entry).key = cmd[1].to_string();
-                (*entry).val = cmd[2].to_string();
-                (*entry).node = key.node;
-                table.insert(NonNull::new_unchecked(&mut (*entry).node));
+            } else {
+                let new_entry = create_node(key, &cmd[2]);
+                table.insert(new_entry);
+                resp.status = ResponseCode::SetNew;
+                resp.data = Some(cmd[2].as_bytes().to_vec());
             }
         };
+
+        free_entry(entry);
 
         resp
     }
 
     pub fn do_del(cmd: &[String]) -> Response {
         let mut resp = Response::default();
-        let key = cmd[1].to_string();
-        let mut key = Entry {
-            key: key.to_string(),
-            val: String::default(),
-            node: HNode {
-                next: None,
-                hcode: str_hash(key.as_bytes()),
-            },
-        };
+        let key = &cmd[1];
+
+        let v = String::default();
+        let entry: NodePtr = create_node(key, v.as_str());
 
         unsafe {
             let mut table = GLOBAL_TABLE.lock().unwrap();
-            let node = table.delete(Some(NonNull::new_unchecked(&mut key.node)), entry_eq);
+            let node = table.delete(Some(entry), entry_eq);
 
-            if node.is_none() {
+            if let Some(ptr) = node {
+                resp.status = ResponseCode::DelOk;
+                let entry = container_of!(ptr.as_ptr(), Entry, node);
+                resp.data = Some((*entry).val.as_bytes().to_vec());
+                free_entry(ptr);
+            } else {
+                resp.status = ResponseCode::DelOk;
                 return resp;
             }
-
-            let ptr = node.as_ref().unwrap().as_ptr();
-            if !ptr.is_null() {
-                let layout = Layout::new::<Entry>();
-                let entry_ptr = container_of_mut!(ptr, Entry, node);
-                dealloc(entry_ptr as *mut u8, layout);
-            }
         };
+
+        free_entry(entry);
 
         resp
     }
@@ -597,7 +583,7 @@ fn main() -> Result<(), std::io::Error> {
         let mut poll_args: Vec<PollFd> = vec![];
 
         loop {
-            println!("Conn: {:?}", &connections);
+            // println!("Conn: {:?}", &connections);
 
             poll_args.clear();
 
@@ -648,7 +634,7 @@ fn main() -> Result<(), std::io::Error> {
                     None => continue,
                 };
 
-                println!("Accepted {} {}", connections.len(), fd);
+                // println!("Accepted {} {}", connections.len(), fd);
 
                 let fd = handle.get_fd();
                 if connections.len() <= fd {
@@ -706,7 +692,7 @@ fn main() -> Result<(), std::io::Error> {
 
         println!("New client: {:#?}", &stream);
 
-        let hello = "hello".repeat(500 * 1024); ////
+        let hello = "hello".repeat(50); ////
         let commands = vec![
             "get",
             hello.as_str(),
