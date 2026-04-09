@@ -730,13 +730,66 @@ pub mod tests {
     }
 
     /// Test re-inserting the same node pointer (logic check).
-    // #[test]
-    fn test_duplicate_node_pointer() {
-        // TODO:
-        // 1. Insert a node.
-        // 2. Insert the SAME node pointer again.
-        // 3. Decide if your implementation handles this (usually size increases,
-        //    but it might create a circular reference if not careful).
+    /// This test proves that the HMap is "dumb" and doesn't check for
+    /// self-referencing loops, leaving safety to the higher-level caller.
+    #[test]
+    fn test_duplicate_node_pointer_naive() {
+        // 1. Setup: small capacity to target a specific bucket easily
+        let mut map = HMap::with_capacity(4);
+        let key = "naive_loop_key";
+        let mut node = create_node(key, "value_1");
+
+        // 2. First insertion:
+        map.insert(node);
+        assert_eq!(map.current.size, 1);
+
+        // 3. Second insertion of the EXACT SAME node pointer.
+        map.insert(node);
+
+        // If the map is "dumb", it increments size without checking for physical identity
+        assert_eq!(
+            map.current.size, 2,
+            "Map should naively increment size for duplicate pointers"
+        );
+
+        println!("LOG: Circular reference created via duplicate insertion.");
+
+        // 4. Verification of the loop
+        unsafe {
+            // Accessing the bucket directly based on type: NonNull<Option<NonNull<HNode>>>
+            let hcode = node.as_ref().hcode;
+            let pos = (hcode & map.current.mask) as usize;
+
+            // Offset to the specific bucket and dereference
+            let bucket_ptr = map.current.buckets.as_ptr().add(pos);
+            let head_option = *bucket_ptr; // Option<NonNull<HNode>>
+
+            let first_node = head_option.expect("Bucket should not be empty");
+            let second_node = first_node
+                .as_ref()
+                .next
+                .expect("Loop: node.next should point to itself");
+
+            println!("LOG: Pointer 1: {:p}", first_node.as_ptr());
+            println!("LOG: Pointer 2: {:p}", second_node.as_ptr());
+
+            assert_eq!(
+                first_node, second_node,
+                "Infinite loop detected: node points to itself!"
+            );
+        }
+
+        // 5. Emergency Cleanup
+        // We MUST break the cycle manually before the test ends,
+        // otherwise a Drop implementation or a cleanup helper will hang forever.
+        unsafe {
+            node.as_mut().next = None;
+            // Now it's safe to delete/free without infinite recursion
+            let deleted = map.delete(Some(node), entry_eq);
+            if let Some(d) = deleted {
+                free_entry(d);
+            }
+        }
     }
 
     /// Stress test for memory leaks and pointer stability.
