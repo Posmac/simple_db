@@ -477,7 +477,7 @@ pub mod redis_commands {
             val: String::default(),
             node: HNode {
                 next: None,
-                hcode: str_hash(key.as_bytes(), key.len()),
+                hcode: str_hash(key.as_bytes()),
             },
         };
 
@@ -510,7 +510,7 @@ pub mod redis_commands {
             val: String::default(),
             node: HNode {
                 next: None,
-                hcode: str_hash(key.as_bytes(), key.len()),
+                hcode: str_hash(key.as_bytes()),
             },
         };
 
@@ -550,7 +550,7 @@ pub mod redis_commands {
             val: String::default(),
             node: HNode {
                 next: None,
-                hcode: str_hash(key.as_bytes(), key.len()),
+                hcode: str_hash(key.as_bytes()),
             },
         };
 

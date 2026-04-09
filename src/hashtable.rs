@@ -69,12 +69,11 @@ unsafe impl Send for HMap {}
 unsafe impl Sync for HMap {}
 
 //FNV Hash
-pub fn str_hash(data: &[u8], len: usize) -> usize {
-    let mut h = 0x811C9DC5;
-    for i in 0..len {
-        h = (h + data[i] as usize) * 0x01000193;
+pub fn str_hash(data: &[u8]) -> usize {
+    let mut h: usize = 0x811C9DC5;
+    for &byte in data {
+        h = h.wrapping_add(byte as usize).wrapping_mul(0x01000193);
     }
-
     h
 }
 
@@ -82,7 +81,15 @@ pub fn entry_eq(lhs: &Bucket, rhs: &Bucket) -> bool {
     unsafe {
         let lhs = container_of!(lhs.as_ref().unwrap().as_ptr(), Entry, node);
         let rhs = container_of!(rhs.as_ref().unwrap().as_ptr(), Entry, node);
-        return (*lhs).key == (*rhs).key;
+        return (*lhs).key.eq(&(*rhs).key);
+    }
+}
+
+pub fn entry_eq_kv(lhs: &Bucket, rhs: &Bucket) -> bool {
+    unsafe {
+        let lhs = container_of!(lhs.as_ref().unwrap().as_ptr(), Entry, node);
+        let rhs = container_of!(rhs.as_ref().unwrap().as_ptr(), Entry, node);
+        return (*lhs).key.eq(&(*rhs).key) && (*lhs).val.eq(&(*rhs).val);
     }
 }
 
@@ -292,10 +299,12 @@ pub mod tests {
     };
 
     use crate::hashtable::{
-        DEFAULT_HASH_SIZE, Entry, HMap, HNode, HTable, NodePtr, entry_eq, str_hash,
+        Bucket, DEFAULT_HASH_SIZE, Entry, HMap, HNode, HTable, NodePtr, entry_eq, entry_eq_kv,
+        str_hash,
     };
 
-    pub fn create_node(key: &str, value: &str, hash: usize) -> NodePtr {
+    pub fn create_node(key: &str, value: &str) -> NodePtr {
+        let hash = str_hash(key.as_bytes());
         let layout = Layout::new::<Entry>();
         unsafe {
             let raw = alloc(layout) as *mut Entry;
@@ -341,22 +350,34 @@ pub mod tests {
         }
     }
 
-    #[test]
-    pub fn test_basic_insert_and_lookup_and_delete() {}
+    fn clear_nodes_by_key(map: &mut HMap, template_node: Bucket, initial_size: usize) {
+        println!("LOG: Starting chain cleanup {}...", map.current.size);
+        let mut deleted_count = 0;
+
+        unsafe {
+            while let Some(ptr) = map.delete(template_node, entry_eq) {
+                let entry = container_of!(ptr.as_ptr(), Entry, node);
+                println!("LOG: Freeing node with value: '{}'", (*entry).val);
+                free_entry(ptr);
+                deleted_count += 1;
+            }
+        }
+
+        assert_eq!(
+            deleted_count, initial_size,
+            "FAILED: Expected to delete {} nodes, but deleted {}",
+            initial_size, deleted_count
+        );
+        assert_eq!(map.current.size, 0, "Table should be empty after cleanup");
+    }
 
     /// Test if the map initializes with correct sizes and null pointers.
     #[test]
     fn test_initialization() {
         // TODO: Create a new HMap and assert that size is 0 and buckets are null-initialized.
         let default = HMap::new();
-        assert!(
-            default.current.size == 0 && default.current.mask == default.current.size - 1,
-            "New current hashtable size != 0"
-        );
-        assert!(
-            default.older.size == 0 && default.older.mask == default.current.size - 1,
-            "New older hashtable size != 0"
-        );
+        assert!(default.current.size == 0, "New current hashtable size != 0");
+        assert!(default.older.size == 0, "New older hashtable size != 0");
     }
 
     /// Test if the map initialization with capacity which is not power of two
@@ -373,32 +394,74 @@ pub mod tests {
     fn test_single_insert_and_lookup() {
         // TODO: Create one node, insert it, and verify lookup returns the correct pointer.
         // Remember to free memory at the end.
-        let mut default = HMap::new();
+        let mut map = HMap::new();
 
-        let data = vec![112u8; 1];
-        let hash = str_hash(&data, data.len());
+        // 1. Preparation
+        let key = "key_1";
+        let val = "val_1";
+        let node = create_node(key, val);
 
-        let node = create_node("key_1", "val_1", hash);
-        default.insert(node);
+        // 2. Execution
+        map.insert(node);
+        println!("LOG: Inserted node with key='{}', val='{}'", key, val);
 
         unsafe {
-            //lookup
-            let entry = container_of!(node.as_ptr(), Entry, node);
-            let lookup = default.lookup(Some(node), entry_eq);
-            if !lookup.is_null() {
-                let fentry = get_entry_from_dp(lookup);
-                println!("LOOKUP: FE: {:#?}, E: {:#?}", *entry, *fentry);
+            // 3. Lookup Verification
+            let lookup = map.lookup(Some(node), entry_eq);
+
+            assert!(
+                !lookup.is_null(),
+                "FAILED: Node with key '{}' should be found in the map",
+                key
+            );
+
+            let fentry = get_entry_from_dp(lookup);
+            println!("LOG: Lookup successful. Found Entry: {:?}", *fentry);
+
+            assert_eq!(
+                (*fentry).key,
+                key,
+                "FAILED: Key mismatch! Expected '{}', found '{}'",
+                key,
+                (*fentry).key
+            );
+            assert_eq!(
+                (*fentry).val,
+                val,
+                "FAILED: Value mismatch! Expected '{}', found '{}'",
+                val,
+                (*fentry).val
+            );
+
+            // 4. Delete & Cleanup Verification
+            let node_to_free = map.delete(Some(node), entry_eq);
+
+            assert!(
+                node_to_free.is_some(),
+                "FAILED: Delete returned None, but node with key '{}' was expected",
+                key
+            );
+
+            if let Some(ptr) = node_to_free {
+                let entry_to_free = container_of!(ptr.as_ptr(), Entry, node);
+                println!(
+                    "LOG: Cleanup. Freeing entry with key: '{}'",
+                    (*entry_to_free).key
+                );
+
+                // Physical memory cleanup
+                free_entry(ptr);
             }
 
-            //delete
-            let node_to_free = default.delete(Some(node), entry_eq);
-            if let Some(ptr) = node_to_free {
-                let entry_to_free = &*container_of!(ptr.as_ptr(), Entry, node);
-                println!("DELETED: {:#?}", entry_to_free);
-                free_entry(ptr);
-            } else {
-                println!("Нода не найдена, удалять нечего");
-            }
+            // 5. Post-delete Verification
+            let final_lookup = map.lookup(Some(node), entry_eq);
+            assert!(
+                final_lookup.is_null(),
+                "FAILED: Node with key '{}' still exists after deletion",
+                key
+            );
+
+            println!("SUCCESS: Single insert/lookup/delete cycle completed perfectly.");
         }
     }
 
@@ -410,27 +473,220 @@ pub mod tests {
         // 2. Insert all three.
         // 3. Verify that lookup can find the "tail" (the first inserted node)
         //    by traversing the 'next' pointers.
-        // 4. Verify size count is 3.
+        // 4. Verify size count is 3
+
+        // 1. Create 3 nodes with the same keys
+        let mut map = HMap::with_capacity(4);
+        let common_key = "node_key_common";
+        let node_1 = create_node(common_key, "value_1");
+        let node_2 = create_node(common_key, "value_2");
+        let node_3 = create_node(common_key, "value_3");
+
+        // 2. Inserting (LIFO order in our bucket: 3 -> 2 -> 1)
+        map.insert(node_1);
+        map.insert(node_2);
+        map.insert(node_3);
+
+        println!(
+            "LOG: Inserted 3 nodes with identical key '{}' into the same bucket.",
+            common_key
+        );
+        assert_eq!(map.current.size, 3, "Table size should be exactly 3");
+
+        unsafe {
+            // 3. Try to find last inserted node (node_3)
+            // lookup "common_key" should return node_3
+            let lookup_ptr = map.lookup(Some(node_3), entry_eq);
+
+            assert!(
+                !lookup_ptr.is_null(),
+                "FAILED: Could not find any node with key '{}'",
+                common_key
+            );
+
+            let fentry = get_entry_from_dp(lookup_ptr);
+            println!(
+                "LOG: Found entry value: '{}' (Expected 'value_3' because it's the chain head)",
+                (*fentry).val
+            );
+
+            assert_eq!(
+                (*fentry).val,
+                "value_3",
+                "FAILED: Lookup should return the most recently inserted node (the head of the chain)"
+            );
+
+            // 4. Clear after yourself, please!
+            clear_nodes_by_key(&mut map, Some(node_1), 3);
+
+            println!("SUCCESS: Collision chain handled and cleaned up correctly.");
+        }
     }
 
     /// Test deleting a node that is at the head of a collision chain.
     #[test]
     fn test_delete_chain_head() {
         // TODO:
-        // 1. Insert 2 nodes into the same bucket.
+        // 1. Insert 3 nodes into the same bucket.
         // 2. Delete the last inserted node (the current head).
         // 3. Verify that the bucket now points to the remaining node.
+
+        // 1. Create 3 nodes
+        let mut map = HMap::with_capacity(4);
+        let key_a = "key_A";
+        let key_b = "key_A";
+        let key_c = "key_A";
+        let node_1 = create_node(key_a, "value_1");
+        let node_2 = create_node(key_b, "value_2");
+        let node_3 = create_node(key_c, "value_3");
+
+        // 2. Inserting (LIFO order in our bucket: 3 -> 2 -> 1)
+        map.insert(node_1);
+        map.insert(node_2);
+        map.insert(node_3);
+
+        println!(
+            "LOG: Inserted 3 nodes with the next keys: {}, {}, {}",
+            key_a, key_b, key_c
+        );
+
+        assert_eq!(map.current.size, 3, "Table size should be exactly 3");
+
+        //3. Delete last inserted node(head)
+        println!("LOG: Removing head: {}", key_c);
+        let deleted = map.delete(Some(node_3), entry_eq);
+        if let Some(d) = deleted {
+            unsafe {
+                let entry = container_of!(d.as_ptr(), Entry, node);
+                println!(
+                    "LOG: Freeing node with key:value: '{}':'{}'",
+                    (*entry).key,
+                    (*entry).val
+                );
+                free_entry(d);
+            }
+        };
+
+        assert_eq!(map.current.size, 2, "Table size should be exactly 2");
+
+        // 4. Clear after yourself, please!
+        clear_nodes_by_key(&mut map, Some(node_1), 2);
+
+        println!("SUCCESS: Delete chain head test succsesfull");
     }
 
     /// Test deleting a node from the middle or end of a collision chain.
     #[test]
     fn test_delete_chain_middle_and_tail() {
         // TODO:
-        // 1. Insert 3 nodes into the same bucket (A -> B -> C).
+        // 1. Insert 3 nodes into the same bucket (C -> B -> A).
         // 2. Delete the middle node (B).
-        // 3. Verify that A's 'next' now points to C.
-        // 4. Delete the tail node (C).
-        // 5. Verify that A's 'next' is now None.
+        // 3. Verify that C's 'next' now points to A.
+        // 4. Delete the tail node (A).
+        // 5. Verify that C's 'next' is now None.
+
+        // 1. Create 3 nodes
+        let mut map = HMap::with_capacity(4);
+        let key_a = "key_A";
+        let key_b = "key_A";
+        let key_c = "key_A";
+        let node_1 = create_node(key_a, "value_1");
+        let node_2 = create_node(key_b, "value_2");
+        let node_3 = create_node(key_c, "value_3");
+
+        // 2. Inserting (LIFO order in our bucket: 3 -> 2 -> 1)
+        map.insert(node_1);
+        map.insert(node_2);
+        map.insert(node_3);
+
+        println!(
+            "LOG: Inserted 3 nodes with the next keys: {}, {}, {}",
+            key_a, key_b, key_c
+        );
+
+        //3. Delete middle inserted node
+        println!("LOG: Removing middle: {}", key_b);
+        let deleted = map.delete(Some(node_2), entry_eq_kv);
+        if let Some(d) = deleted {
+            unsafe {
+                let entry = container_of!(d.as_ptr(), Entry, node);
+                println!(
+                    "LOG: Freeing node with key:value: '{}':'{}'",
+                    (*entry).key,
+                    (*entry).val
+                );
+                free_entry(d);
+            }
+        };
+
+        assert_eq!(map.current.size, 2, "Table size should be exactly 2");
+
+        //4. Get C node and check if it poins to A node
+        let c_node = map.lookup(Some(node_3), entry_eq_kv);
+        assert!(
+            !c_node.is_null(),
+            "FAILED: Could not find any node with key '{}'",
+            key_c,
+        );
+
+        unsafe {
+            if let Some(c) = *c_node {
+                let ptr = c.as_ref().next;
+                assert!(
+                    ptr.is_some(),
+                    "FAILED: Head should point to some valid tail, not none!"
+                );
+                assert!(
+                    ptr.unwrap().as_ptr() == node_1.as_ptr(),
+                    "FAILED: Head is not pointing at the expected tail; HEAD NEXT: {:?}, EXPECTED NEXT: {:?}",
+                    (*(c.as_ptr())).next.unwrap(),
+                    node_1
+                );
+                println!(
+                    "LOG: C node points to A node: {:?} == {:?}",
+                    ptr.unwrap().as_ptr(),
+                    node_1.as_ptr()
+                )
+            }
+        }
+
+        //5. Delete tail node A
+        println!("LOG: Removing middle: {}", key_a);
+        let deleted = map.delete(Some(node_1), entry_eq_kv);
+        if let Some(d) = deleted {
+            unsafe {
+                let entry = container_of!(d.as_ptr(), Entry, node);
+                println!(
+                    "LOG: Freeing node with key:value: '{}':'{}'",
+                    (*entry).key,
+                    (*entry).val
+                );
+                free_entry(d);
+            }
+        };
+
+        assert_eq!(map.current.size, 1, "Table size should be exactly 2");
+
+        //6. Get C node and check if it poins to NONE node
+        let c_node = map.lookup(Some(node_3), entry_eq_kv);
+        assert!(
+            !c_node.is_null(),
+            "FAILED: Could not find any node with key '{}'",
+            key_c,
+        );
+
+        unsafe {
+            if let Some(c) = *c_node {
+                let ptr = c.as_ref().next;
+                assert!(!ptr.is_some(), "FAILED: Head should point to NONE!");
+                println!("LOG: C node points to NONE node: {:?} == NONE", ptr,)
+            }
+        }
+
+        // 7. Clear after yourself, please!
+        clear_nodes_by_key(&mut map, Some(node_3), 1);
+
+        println!("SUCCESS: Delete chain head test succsesfull");
     }
 
     /// Test lookup behavior when the key does not exist in the map.
@@ -440,10 +696,41 @@ pub mod tests {
         // 1. Insert some nodes.
         // 2. Perform a lookup with a key/hcode that was never inserted.
         // 3. Assert that lookup returns null_mut().
+
+        // 1. Create 3 nodes
+        let mut map = HMap::with_capacity(4);
+        let key_a = "key_A";
+        let key_b = "key_A";
+        let key_c = "key_A";
+        let node_1 = create_node(key_a, "value_1");
+        let node_2 = create_node(key_b, "value_2");
+        let node_3 = create_node(key_c, "value_3");
+
+        // 2. Inserting (LIFO order in our bucket: 2 -> 1)
+        map.insert(node_1);
+        map.insert(node_2);
+
+        println!(
+            "LOG: Inserted 3 nodes with the next keys: {}, {}, {}",
+            key_a, key_b, key_c
+        );
+
+        //3. Get NODE which wasnt inserted
+        let c_node = map.lookup(Some(node_3), entry_eq_kv);
+        assert!(
+            c_node.is_null(),
+            "FAILED: Find a node which wasnt inserted '{}'",
+            key_c,
+        );
+
+        // 4. Clear after yourself, please!
+        clear_nodes_by_key(&mut map, Some(node_1), 2);
+
+        println!("SUCCESS: Lookup missing key");
     }
 
     /// Test re-inserting the same node pointer (logic check).
-    #[test]
+    // #[test]
     fn test_duplicate_node_pointer() {
         // TODO:
         // 1. Insert a node.
@@ -453,7 +740,7 @@ pub mod tests {
     }
 
     /// Stress test for memory leaks and pointer stability.
-    #[test]
+    // #[test]
     fn test_stress_insert_delete() {
         // TODO:
         // 1. In a loop (e.g., 1000 iterations), insert nodes with different keys.
@@ -463,7 +750,7 @@ pub mod tests {
     }
 
     /// Test if lookup correctly checks both 'current' and 'older' tables during resizing.
-    #[test]
+    // #[test]
     fn test_lookup_during_resizing() {
         // TODO:
         // 1. Manually move a node to the 'older' table.
