@@ -25,25 +25,38 @@ This project isn't just a wrapper; it's a deep-dive into the internals of Redis:
 ---
 ## Progress
 
-- Completed up to **Chapter 8** of the BYOR guide  
-- Implemented so far:
-  - TCP server ✅
-  - Protocol ✅  
-  - Basic GET / SET commands ✅  
-  - Hash Map storage logic ✅  
+- Chapters:
+  - ✅ 1                
+  - ✅ 2               
+  - ✅ 3                
+  - ✅ 4                 
+  - ✅ 5                  
+  - ✅ 6                   
+  - ✅ 7.1                  
+  - ✅ 7.2              
+  - ✅ 8.1                     
+  - ✅ 8.2                            
+  - ✅ 8.2                            
+  - ⬜ 9                            
+  - ⬜ 10                                   
+  - ⬜ 11                                   
+  - ⬜ 12                                          
+  - ⬜ 13                                   
+  - ⬜ 14                            
  
 ---
 ## TODO
 
-- ✅ TCP server  
-- ✅ Basic GET / SET / DEL 
+- ✅ TCP server/client 
+- ✅ Basic GET / SET / DEL
+- ✅ Primitive protocol Request/Response
 - ✅ Hash Map logic  
-- ✅ Key/value serialization
 - ✅ Write tests for HMap/HTable
-- ✅ Deserialization/serialization
-- ⬜ Improve DEL command
-- ⬜ Improve Set operations  
-- ⬜ Add B-Tree for ordered data  
+- ✅ Improve GET/SET/DEL commands for HMap/HTable
+- ⬜ Deserialization/serialization
+- ⬜ Add B-Tree
+- ⬜ Add Sorted Set
+- ⬜ Timers and timeout
 - ⬜ Implement TTL (automatic key expiration)  
 - ⬜ Add multithreading (worker pool / sharding)  
 - ⬜ Write tests for each data structure  
@@ -66,8 +79,6 @@ src/
 ---
 
 ## Next Steps (2–3 weeks)
-
-1. Finish core commands (ADD/SET/DEL) using more complex data structures                                
-2. Add TTL and simple multithreading                                
+1. Finish Redis in Rust                                
 3. Write tests and mini-benchmarks                                
 4. Publish progress on LinkedIn/GitHub with architecture explanation                              
