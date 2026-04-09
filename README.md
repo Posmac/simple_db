@@ -39,6 +39,7 @@ This project isn't just a wrapper; it's a deep-dive into the internals of Redis:
 - ✅ Basic GET / SET / DEL 
 - ✅ Hash Map logic  
 - ✅ Key/value serialization
+- ✅ Write tests for HMap/HTable
 - ⬜ Improve DEL command
 - ⬜ Improve Set operations  
 - ⬜ Add B-Tree for ordered data  
