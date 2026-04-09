@@ -1,5 +1,7 @@
 use std::ptr::NonNull;
 
+use libc::xsw_usage;
+
 pub type LookUpFunction = fn(&Bucket, &Bucket) -> bool;
 
 const MAX_LOAD_FACTOR: usize = 8;
@@ -33,7 +35,7 @@ macro_rules! container_of_mut {
 type NodePtr = NonNull<HNode>;
 type Bucket = Option<NodePtr>;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct Entry {
     pub key: String,
@@ -50,7 +52,7 @@ pub struct HMap {
     migrate_pos: usize,
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 #[repr(C)]
 pub struct HNode {
     pub next: Bucket, //Option<NonNull<HNode>>;
@@ -101,11 +103,12 @@ impl HMap {
     pub fn with_capacity(size: usize) -> Self {
         assert!(
             size > 0 && (size & (size - 1)) == 0,
-            "capacity must be power of two and non zero"
+            "capacity must be power of two and non zero. Now: {}",
+            size
         );
         Self {
             current: HTable::with_capacity(size),
-            older: HTable::with_capacity(DEFAULT_HASH_SIZE),
+            older: HTable::empty(),
             migrate_pos: 0,
         }
     }
@@ -113,7 +116,7 @@ impl HMap {
     pub fn lookup(&mut self, key: Bucket, f: LookUpFunction) -> *mut Bucket {
         self.help_rehashing();
         let mut from = self.current.lookup(key, f);
-        if from.is_null() {
+        if from.is_null() && self.older.mask > 0 {
             from = self.older.lookup(key, f);
         }
 
@@ -127,6 +130,7 @@ impl HMap {
         self.current.insert(node);
         let rehash_trashold = self.current.mask * MAX_LOAD_FACTOR;
         if self.current.size >= rehash_trashold {
+            // println!("Trashold reached: {rehash_trashold} {}", self.current.size);
             self.trigger_rehashing();
         }
         self.help_rehashing();
@@ -139,39 +143,56 @@ impl HMap {
             return self.current.detach(from);
         }
 
-        let from_old = self.older.lookup(key, f);
-        if !from_old.is_null() {
-            return self.older.detach(from_old);
+        if self.older.mask > 0 {
+            let from_old = self.older.lookup(key, f);
+            if !from_old.is_null() {
+                return self.older.detach(from_old);
+            }
         }
         None
     }
 
+    //INFO: Fucking dumb realization using '=', beacuse it drops bucket
+    // fn trigger_rehashing(&mut self) {
+    //     println!("Old: {:#?}, new: {:#?}", self.older, self.current);
+    //     self.older = self.current.clone();
+    //     let new = HTable::with_capacity((self.current.mask + 1) * 2);
+    //     self.current = new;
+    //     self.migrate_pos = 0;
+    //     println!("Old: {:#?}, new: {:#?}", self.older, self.current);
+    // }
+    //INFO: Good one
     fn trigger_rehashing(&mut self) {
-        self.older = self.current.clone();
-        let new = HTable::with_capacity((self.current.mask + 1) * 2);
-        self.current = new;
+        self.older = std::mem::replace(&mut self.current, HTable::new());
+        let new_capacity = (self.older.mask + 1) * 2;
+        self.current = HTable::with_capacity(new_capacity);
         self.migrate_pos = 0;
     }
 
     fn help_rehashing(&mut self) {
         let mut nwork: usize = 0;
 
+        if self.older.mask == 0 {
+            return;
+        }
+
         while nwork < REHASHING_WORK_SIZE && self.older.size > 0 {
             unsafe {
-                let from = self.older.buckets.as_ptr().add(self.migrate_pos);
+                let start = self.older.buckets.as_ptr().add(self.migrate_pos);
 
-                if from.is_null() {
+                if (*start).is_none() {
                     self.migrate_pos += 1;
                     continue;
                 }
-                let detached = self.older.detach(from);
+
+                let detached = self.older.detach(start);
                 self.current.insert(detached.unwrap());
                 nwork += 1;
             }
         }
 
         if self.older.size == 0 {
-            self.older = HTable::new();
+            self.older = HTable::empty();
         }
     }
 }
@@ -179,6 +200,9 @@ impl HMap {
 impl Drop for HTable {
     fn drop(&mut self) {
         unsafe {
+            if self.mask == 0 {
+                return;
+            }
             libc::free(self.buckets.as_ptr() as *mut libc::c_void);
         }
     }
@@ -192,7 +216,8 @@ impl HTable {
     pub fn with_capacity(size: usize) -> Self {
         assert!(
             size > 0 && (size & (size - 1)) == 0,
-            "capacity must be power of two and non zero"
+            "capacity must be power of two and non zero {}",
+            size
         );
 
         //INFO: Unsafe
@@ -205,6 +230,14 @@ impl HTable {
             //INFO: Unsafe
             buckets: unsafe { NonNull::new_unchecked(buckets_vec_ptr) },
             mask: size - 1,
+            size: 0,
+        }
+    }
+
+    pub fn empty() -> Self {
+        Self {
+            buckets: NonNull::dangling(),
+            mask: 0,
             size: 0,
         }
     }
@@ -295,8 +328,11 @@ pub mod tests {
 
     use std::{
         alloc::{Layout, alloc, dealloc},
+        collections::{HashMap, HashSet},
         ptr::{self, NonNull, null_mut},
     };
+
+    use libc::free;
 
     use crate::hashtable::{
         Bucket, DEFAULT_HASH_SIZE, Entry, HMap, HNode, HTable, NodePtr, entry_eq, entry_eq_kv,
@@ -725,6 +761,7 @@ pub mod tests {
 
         // 4. Clear after yourself, please!
         clear_nodes_by_key(&mut map, Some(node_1), 2);
+        free_entry(node_3);
 
         println!("SUCCESS: Lookup missing key");
     }
@@ -792,22 +829,103 @@ pub mod tests {
         }
     }
 
-    /// Stress test for memory leaks and pointer stability.
-    // #[test]
+    #[test]
     fn test_stress_insert_delete() {
-        // TODO:
-        // 1. In a loop (e.g., 1000 iterations), insert nodes with different keys.
-        // 2. In another loop, delete them all.
-        // 3. Verify size returns to 0.
-        // Run this test with 'cargo miri test' to detect leaks.
+        const TOTAL_ITERS: usize = 10_00;
+        let mut map = HMap::with_capacity(4); //Start with low, in order to provoke resize
+        let mut nodes: Vec<NonNull<HNode>> = Vec::with_capacity(TOTAL_ITERS);
+
+        // 1. Insert
+        for i in 0..TOTAL_ITERS {
+            let key = format!("key_{}", i);
+            let val = format!("val_{}", i);
+            let node = create_node(&key, &val);
+            map.insert(node);
+            nodes.push(node);
+        }
+
+        let total_size = map.current.size + map.older.size;
+        assert_eq!(total_size, TOTAL_ITERS, "Size mismatch after insertions");
+        println!(
+            "LOG: Inserted {} nodes. Map size: {}",
+            TOTAL_ITERS, total_size
+        );
+
+        // 2. Remove
+        let mut removed = 0;
+        for n in nodes {
+            let detached = map.delete(Some(n), entry_eq);
+            if let Some(d) = detached {
+                assert_eq!(d, n, "Deleted the wrong node pointer!");
+                free_entry(d);
+                removed += 1;
+            }
+        }
+
+        let final_size = map.current.size + map.older.size;
+        println!("LOG: Removed {} nodes. Map size: {}", removed, final_size);
+
+        // 3. Final checks
+        assert_eq!(removed, TOTAL_ITERS, "Failed to remove some nodes");
+        assert_eq!(final_size, 0, "Map is not empty after removing all nodes");
+
+        assert_eq!(
+            map.older.mask, 0,
+            "Older table should be freed and replaced with empty placeholder"
+        );
     }
 
-    /// Test if lookup correctly checks both 'current' and 'older' tables during resizing.
-    // #[test]
+    #[test]
     fn test_lookup_during_resizing() {
-        // TODO:
-        // 1. Manually move a node to the 'older' table.
-        // 2. Perform a lookup via HMap.
-        // 3. Verify that HMap finds it even if it's not in the 'current' table.
+        // 1. Init map with low cap
+        let mut map = HMap::with_capacity(4);
+
+        // 2. Insert some data without triggering rehash
+        let key_old = "key_in_older";
+        let val_old = "value_old";
+        let node_old = create_node(key_old, val_old);
+        map.insert(node_old);
+
+        // 3. Forcing rehash.
+        map.trigger_rehashing();
+
+        // now node_old GUARANTED in older, but current is empty!.
+        assert!(map.older.size > 0);
+        assert_eq!(map.current.size, 0);
+
+        // 4. Check 1: Lookup will find smth in older?
+        let found_old = map.lookup(Some(node_old), entry_eq);
+        assert!(!found_old.is_null(), "Should find node in 'older' table");
+
+        unsafe {
+            if let Some(fo) = *found_old {
+                let entry = container_of!(fo.as_ptr(), Entry, node);
+                assert_eq!((*entry).key, key_old);
+            }
+        }
+
+        //5. Inserting new key into the current as rehashing is in process
+        let key_new = "key_in_current";
+        let val_new = "value_new";
+        let node_new = create_node(key_new, val_new);
+        map.insert(node_new);
+
+        // 6. Check 2: Does lookup finds data in current?
+        let found_new = map.lookup(Some(node_new), entry_eq);
+        assert!(!found_new.is_null(), "Should find node in 'current' table");
+
+        // 7. Check 3: Concurrent availability
+        let found_old_again = map.lookup(Some(node_old), entry_eq);
+        assert!(
+            !found_old_again.is_null(),
+            "Should still find node in 'older' even after new inserts"
+        );
+
+        while map.older.size > 0 {
+            map.help_rehashing();
+        }
+
+        free_entry(node_old);
+        free_entry(node_new);
     }
 }
