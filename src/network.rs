@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    common::{MAX_COMMANDS_SIZE, MAX_MSG_SIZE, MSG_HEADER_SIZE, get_header, get_message},
+    common::{MAX_COMMANDS_SIZE, MAX_MSG_SIZE, MSG_HEADER_SIZE, get_header, get_message, get_str},
     redis::{do_del, do_get, do_set},
     transport::{read_full, write_full},
     tvl::{
@@ -307,13 +307,4 @@ pub fn read_response(stream: &mut TcpStream) -> usize {
         }
     };
     rsize
-}
-
-pub fn get_str(bytes: &[u8]) -> String {
-    let mut size_b = [0u8; size_of::<usize>()];
-    size_b.copy_from_slice(&bytes[0..size_of::<usize>()]);
-
-    let str_size = usize::from_ne_bytes(size_b);
-
-    get_message(&bytes[..], size_of::<usize>(), str_size)
 }

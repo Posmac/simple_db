@@ -180,34 +180,6 @@ fn main() -> Result<(), std::io::Error> {
                 // break;
             }
         }
-
-        // let mut str: Vec<u8> = vec![65; MAX_MSG_SIZE - 200];
-        // str.extend_from_slice(local_addr.as_bytes());
-
-        // let mut queries = vec![];
-        // let msg1 = format!("Hello from client! {}", local_addr);
-        // let msg2 = format!("AGAIN_Hello from client! {}", address);
-        // let msg3 = format!("LAST_Hello from client! {}", address);
-
-        // queries.push(str.as_slice());
-        // queries.push(msg1.as_bytes());
-        // queries.push(msg2.as_bytes());
-        // queries.push(msg3.as_bytes());
-
-        // loop {
-        //     for q in queries.iter() {
-        //         let wsize = process_message_write(&mut stream, q);
-        //         if wsize == 0 {
-        //             println!("Failed to query from client");
-        //         }
-        //     }
-
-        //     for i in 0..queries.len() {
-        //         let rsize = process_message_read(&mut stream);
-        //         println!("Read from server:");
-        //     }
-        // }
     }
-
     Ok(())
 }

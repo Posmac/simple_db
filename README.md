@@ -37,7 +37,7 @@ This project isn't just a wrapper; it's a deep-dive into the internals of Redis:
   - ✅ 8.1                     
   - ✅ 8.2                            
   - ✅ 8.2                            
-  - ⬜ 9                            
+  - ✅ 9                            
   - ⬜ 10                                   
   - ⬜ 11                                   
   - ⬜ 12                                          
@@ -53,7 +53,7 @@ This project isn't just a wrapper; it's a deep-dive into the internals of Redis:
 - ✅ Hash Map logic  
 - ✅ Write tests for HMap/HTable
 - ✅ Improve GET/SET/DEL commands for HMap/HTable
-- ⬜ Deserialization/serialization
+- ✅ Deserialization/serialization
 - ⬜ Add B-Tree
 - ⬜ Add Sorted Set
 - ⬜ Timers and timeout
@@ -67,14 +67,18 @@ This project isn't just a wrapper; it's a deep-dive into the internals of Redis:
 
 ## Project Structure (example)
 src/                              
-├─ main.rs # TCP server                              
-├─ hashtable.rs # Intrusive Hash Map                              
+├─ main.rs # server/client initialization                             
+├─ hashtable.rs # Intrusive Hash Map                                  
+├─ common.rs # Some common stuff                                   
+├─ network.rs # Everything related to response/request send/recieve                               
+├─ redis.rs # redis commands do_set, do_get, do_del, etc                            
+├─ transport.rs # Readin from/writing to TcpStream                           
+├─ tvl.rs # serialization/deserialization stuff                           
 //future                              
 ├─ btree.rs # B-Tree                              
 ├─ set.rs # Set                              
 ├─ ttl.rs # TTL mechanism                              
 ├─ threading.rs # Multithreading                              
-└─ utils.rs # Helper functions                              
 
 ---
 

@@ -27,3 +27,12 @@ pub fn get_message(bytes: &[u8], offset: usize, size: usize) -> String {
 
     message.to_string()
 }
+
+pub fn get_str(bytes: &[u8]) -> String {
+    let mut size_b = [0u8; size_of::<usize>()];
+    size_b.copy_from_slice(&bytes[0..size_of::<usize>()]);
+
+    let str_size = usize::from_ne_bytes(size_b);
+
+    get_message(&bytes[..], size_of::<usize>(), str_size)
+}
