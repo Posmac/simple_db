@@ -26,23 +26,22 @@ This project isn't just a wrapper; it's a deep-dive into the internals of Redis:
 ## Progress
 
 - Chapters:
-  - ✅ 1                
-  - ✅ 2               
-  - ✅ 3                
-  - ✅ 4                 
-  - ✅ 5                  
-  - ✅ 6                   
-  - ✅ 7.1                  
-  - ✅ 7.2              
-  - ✅ 8.1                     
-  - ✅ 8.2                            
-  - ✅ 8.2                            
-  - ✅ 9                            
-  - ⬜ 10                                   
-  - ⬜ 11                                   
-  - ⬜ 12                                          
-  - ⬜ 13                                   
-  - ⬜ 14                            
+  - ✅ 1 Intro                
+  - ✅ 2 Socket programming              
+  - ✅ 3 TCP server and client               
+  - ✅ 4 Request-response protocol                
+  - ✅ 5 Concurrent IO models                  
+  - ✅ 6.1 Event loop v1                  
+  - ✅ 6.2 Event loop v2                  
+  - ✅ 7 Key-Value server              
+  - ✅ 8.1 Hashtable v1                     
+  - ✅ 8.2 Hashtable v2                                                       
+  - ✅ 9 Data serialization                            
+  - ⬜ 10 Balanced binary tree                                  
+  - ⬜ 11 Sorted set                                  
+  - ⬜ 12 Time and Timeout                                         
+  - ⬜ 13 Cache expiration with TTL                                  
+  - ⬜ 14 Thread Pool                            
  
 ---
 ## TODO
